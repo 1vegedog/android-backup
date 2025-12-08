@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<permissions>
+    <privapp-permissions package="com.example.mirrorclient">
+        <!-- 按需在这里添加具体特权权限，比如：
+        <permission name="android.permission.INTERACT_ACROSS_USERS"/>
+        -->
+    </privapp-permissions>
+</permissions>

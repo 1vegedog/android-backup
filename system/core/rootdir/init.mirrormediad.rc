@@ -1,0 +1,7 @@
+service mirrormediad /system/bin/mirrormediad
+    class main
+    user root
+    group root
+    seclabel u:r:mirrormediad:s0
+    oneshot
+

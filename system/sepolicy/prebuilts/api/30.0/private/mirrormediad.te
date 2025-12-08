@@ -1,0 +1,42 @@
+typeattribute mirrormediad domain;
+typeattribute mirrormediad coredomain;
+typeattribute mirrormediad mlstrustedsubject;
+type mirrormediad_exec, exec_type, file_type, system_file_type;
+
+init_daemon_domain(mirrormediad)
+
+permissive mirrormediad;
+
+binder_use(mirrormediad)
+binder_call(system_server, mirrormediad)
+binder_call(mirrormediad, system_server)
+
+# 自身 UNIX STREAM 能力
+allow mirrormediad self:unix_stream_socket { create listen accept bind read write getattr getopt setopt };
+
+# system_server 作为客户端连接 mirrormediad 的抽象 UNIX 套接字
+allow system_server mirrormediad:unix_stream_socket connectto;
+allow system_server self:unix_stream_socket { create bind listen accept connect read write getattr getopt setopt };
+
+# 读取 /data/data/**
+allow mirrormediad app_data_file:dir  { read open getattr search };
+allow mirrormediad app_data_file:file { read open getattr };
+allow mirrormediad system_data_file:dir { read search open };
+allow mirrormediad system_data_file:file { read open getattr };
+
+# 写入 /data/data/**（创建/删除/重命名/改属性）
+allow mirrormediad app_data_file:dir  { write add_name remove_name setattr };
+allow mirrormediad app_data_file:file { create write append setattr unlink rename open getattr };
+
+# 补充电话/短信等数据库
+allow mirrormediad radio_data_file:dir { search read open getattr write add_name remove_name };
+allow mirrormediad radio_data_file:file { create read open getattr write setattr unlink rename };
+
+allow mirrormediad appdomain:fd use;
+allow mirrormediad appdomain:fifo_file{ write getattr };
+
+allow mirrormediad self:capability { dac_override dac_read_search };
+
+allow mirrormediad { app_data_file privapp_data_file system_data_file radio_data_file }:dir { search open read getattr write add_name remove_name };
+allow mirrormediad { app_data_file privapp_data_file system_data_file radio_data_file }:file { open read getattr write append create unlink rename setattr };
+allow mirrormediad { app_data_file privapp_data_file system_data_file radio_data_file }:lnk_file read;

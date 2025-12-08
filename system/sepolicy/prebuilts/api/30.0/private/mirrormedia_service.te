@@ -1,0 +1,11 @@
+# Application-facing API service
+type mirrormedia_service, app_api_service, service_manager_type;
+
+# Native daemon service
+type mirror_media_native_service, system_api_service, service_manager_type;
+
+# Allow system_server to register the app service
+allow system_server mirrormedia_service:service_manager add;
+
+# Allow mirrormediad to register the native service
+allow mirrormediad mirror_media_native_service:service_manager add;

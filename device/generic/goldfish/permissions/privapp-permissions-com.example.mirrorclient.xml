@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<permissions>
+    <privapp-permissions package="com.example.mirrorclient">
+        <!-- 先留空，确保编译通过；需要额外特权时再按白名单添加 -->
+        <!-- 例如：
+        <permission name="android.permission.INTERACT_ACROSS_USERS"/>
+        -->
+    </privapp-permissions>
+</permissions>
+

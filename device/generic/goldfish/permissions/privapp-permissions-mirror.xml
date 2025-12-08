@@ -1,0 +1,5 @@
+<permissions>
+  <privapp-permissions package="com.mirrorbackup.client">
+    <permission name="com.MirrorBackup.permissiom.MIRROR_MEDIA"/>
+  </privapp-permissions>
+</permissions>

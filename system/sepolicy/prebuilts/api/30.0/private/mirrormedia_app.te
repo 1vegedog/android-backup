@@ -1,0 +1,19 @@
+# Mirror Media App domain
+type mirrormedia_app, domain;
+
+# 基础应用域设置
+app_domain(mirrormedia_app)
+
+# 如果是特权应用，添加这行
+# priv_app_domain(mirrormedia_app)
+
+# 允许使用binder
+binder_use(mirrormedia_app)
+binder_call(mirrormedia_app, system_server)
+
+# 允许访问自己的服务
+allow mirrormedia_app mirrormedia_service:service_manager find;
+
+# 文件访问权限（根据需要调整）
+allow mirrormedia_app app_data_file:file { read write create unlink };
+allow mirrormedia_app privapp_data_file:file { read write create unlink };

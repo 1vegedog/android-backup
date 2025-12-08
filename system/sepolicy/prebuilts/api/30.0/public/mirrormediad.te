@@ -1,0 +1,4 @@
+# public declaration of mirrormediad so public policy can reference it
+# (added to allow mirrormediad to be included in public neverallow exclusion lists)
+type mirrormediad;
+

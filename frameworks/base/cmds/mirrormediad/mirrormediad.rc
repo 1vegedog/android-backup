@@ -1,0 +1,11 @@
+service mirrormediad /system/bin/mirrormediad
+    class core
+    user root
+    group root
+    socket mirrormedia stream 0660 system system
+    seclabel u:r:mirrormediad:s0
+    disabled
+
+on property:sys.boot_completed=1
+    start mirrormediad
+
