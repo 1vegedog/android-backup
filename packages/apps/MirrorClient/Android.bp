@@ -1,0 +1,9 @@
+android_app {
+  name: "MirrorClient",
+  platform_apis: true,
+  manifest: "AndroidManifest.xml",
+  privileged: true, 
+  product_specific: true,
+  certificate: "platform",
+  srcs: ["src/**/*.java"],
+}

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest package="com.example.mirrorclient"
+    xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- 平台签名 + privileged 已经在 Android.bp 配置，这里无需特殊权限即可跑你自己的系统服务。
+         如需额外权限，再按需添加。 -->
+
+    <application
+        android:allowBackup="false"
+        android:label="Mirror Client"
+        android:debuggable="true"
+        android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
+

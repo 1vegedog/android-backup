@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">MirrorClient</string>
+    <string name="hint_package">包名（例如：com.android.dialer）</string>
+    <string name="hint_zip_out">ZIP 输出路径</string>
+    <string name="hint_in_zip">输入 ZIP 路径</string>
+    <string name="btn_zip_all">ZIP /data/data</string>
+    <string name="btn_zip_pkg">ZIP 指定包</string>
+    <string name="btn_unzip_all">UNZIP 到 /data/data</string>
+    <string name="btn_unzip_pkg">UNZIP 到指定包</string>
+</resources>

@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <!-- 包名输入 -->
+        <EditText
+            android:id="@+id/editPackage"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="包名（例如 com.bnyro.recorder）" />
+
+
+        <Button
+            android:id="@+id/btnZipAll"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="ZIP 导出 /data/data" />
+
+
+
+
+        <Button
+            android:id="@+id/btnRawDumpAll"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="RAW 导出 /data/data（无压缩）" />
+
+ 
+        
+        <Button 
+            android:id="@+id/btnRestoreDataData"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="从本地还原/data/data" />
+        
+         <Button 
+            android:id="@+id/btnRestoreSdcardData"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="从本地还原/sdcard/Android/data" />
+
+
+
+        <!-- 简单日志输出 -->
+        <TextView
+            android:id="@+id/textLog"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="12sp"
+            android:paddingTop="8dp"
+            android:text="log..." />
+    </LinearLayout>
+</ScrollView>
+

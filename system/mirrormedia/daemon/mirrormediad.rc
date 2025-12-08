@@ -1,0 +1,10 @@
+service mirrormediad /system/bin/mirrormediad
+    class main
+    user root
+    group root readproc
+    seclabel u:r:mirrormediad:s0
+    capabilities DAC_OVERRIDE DAC_READ_SEARCH CHOWN FOWNER
+    oneshot
+on post-fs-data
+    mkdir /data/system/mirrormedia 0700 system system
+    restorecon_recursive /data/system/mirrormedia

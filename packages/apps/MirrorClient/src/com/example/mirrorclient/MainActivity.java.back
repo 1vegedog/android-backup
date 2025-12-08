@@ -1,0 +1,126 @@
+package com.example.mirrorclient;
+
+import android.app.Activity;
+import android.app.mirror.MirrorMediaManager;
+import android.content.Context;
+import android.os.Bundle;
+import android.os.UserHandle;
+import android.widget.Button;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+public class MainActivity extends Activity {
+
+    private MirrorMediaManager mMgr;
+    private String mSessionId;
+    private TextView mLogs;
+
+    private final ExecutorService io = Executors.newSingleThreadExecutor();
+
+    private void log(String s) {
+        runOnUiThread(() -> {
+            mLogs.append(s);
+            mLogs.append("\n");
+        });
+    }
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);   
+
+        mLogs = findViewById(R.id.txtLogs);
+        Button btnInZip = findViewById(R.id.btnInZip);
+        Button btnOutZip = findViewById(R.id.btnOutZip);
+
+        mMgr = (MirrorMediaManager) getSystemService(Context.MIRROR_MEDIA_SERVICE);
+        if (mMgr == null) {
+            Toast.makeText(this, "MirrorMediaManager 不可用", Toast.LENGTH_LONG).show();
+            log("MirrorMediaManager == null，检查 SystemServiceRegistry 注册/服务名 mirror_media");
+            return;
+        }
+        log("MirrorMediaManager ready");
+
+        btnInZip.setOnClickListener(v -> {
+        // beginSession
+            try {
+                mSessionId = mMgr.beginSession(UserHandle.myUserId(), null);
+                log("beginSession -> " + mSessionId);
+            } catch (RuntimeException e) {
+                log("beginSession 失败: " + e);
+                Toast.makeText(this, "beginSession 失败: " + e.getMessage(), Toast.LENGTH_LONG).show();
+            }
+            
+            
+            if (mSessionId == null) {
+                Toast.makeText(this, "请先 Begin Session", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            final String absDir = "/data/data";
+            // 输出在 app 私有目录，避免存储权限问题
+            final File out = new File(getFilesDir(), "out.zip");
+            log("开始打包: " + absDir + " -> " + out.getAbsolutePath());
+            io.execute(() -> {
+                try {
+                    mMgr.streamFolderZipToFile(mSessionId, absDir, out);
+                    log("打包完成: " + out.length() + " bytes");
+                } catch (Throwable t) {
+                    log("打包失败: " + t);
+                } finally {
+                try {
+                mMgr.endSession(mSessionId);
+                log("endSession " + mSessionId);
+            } catch (RuntimeException e) {
+                log("endSession 失败: " + e);
+            } }
+            
+            mSessionId = null;
+                
+            });
+            
+        });
+        
+        btnOutZip.setOnClickListener(v -> {
+    // beginSession
+    try {
+        mSessionId = mMgr.beginSession(UserHandle.myUserId(), null);
+        log("beginSession -> " + mSessionId);
+    } catch (RuntimeException e) {
+        log("beginSession 失败: " + e);
+        Toast.makeText(this, "beginSession 失败: " + e.getMessage(), Toast.LENGTH_LONG).show();
+    }
+    if (mSessionId == null) {
+        Toast.makeText(this, "请先 Begin Session", Toast.LENGTH_SHORT).show();
+        return;
+    }
+
+    // 解压来源：应用私有目录的 dump.zip
+    final File zipFile = new File(getFilesDir(), "in.zip");
+    final String targetDir = "/data/data"; // 注意权限
+
+    if (!zipFile.exists()) {
+        Toast.makeText(this, "in.zip 不存在", Toast.LENGTH_SHORT).show();
+        return;
+    }
+
+    log("开始解压: " + zipFile.getAbsolutePath() + " -> " + targetDir);
+
+    io.execute(() -> {
+            // 如果 mMgr 有直接解压到文件夹的方法
+           // mMgr.unzipToFolder(mSessionId, zipFile, targetDir);
+            mMgr.endSession(mSessionId);
+            mSessionId = null;
+            });
+        });
+}}
+

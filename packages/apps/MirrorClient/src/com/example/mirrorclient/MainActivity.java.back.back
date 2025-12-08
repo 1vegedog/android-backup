@@ -1,0 +1,184 @@
+
+package com.example.mirrorclient;
+
+import android.app.Activity;
+import android.app.mirror.MirrorMediaManager;
+import android.content.Context;
+import android.net.Uri;
+import android.os.Bundle;
+import android.util.Log;
+import android.view.View;
+import android.widget.Button;
+import android.widget.EditText;
+import android.widget.Toast;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+/**
+* 备份还原演示：
+* - 备份： MirrorMediaManager.streamFolderZip("/data/data", OutputStream out)
+* - 还原： MirrorMediaManager.restoreFromZip(targetLogicalRoot, InputStream in)
+*
+* 目标路径既可为 "/data/data"（全量）也可为 "/data/data/"（单包）。
+* in.zip / out.zip 均放在 getFilesDir() 下，便于测试。
+*/
+public class MainActivity extends Activity {
+
+   private static final String TAG = "MirrorClient";
+   private MirrorMediaManager mMgr;
+   private final ExecutorService ioPool = Executors.newSingleThreadExecutor();
+
+   @Override
+   protected void onCreate(Bundle savedInstanceState) {
+       super.onCreate(savedInstanceState);
+       setContentView(R.layout.activity_main); // 用你的布局
+
+       mMgr = getMirrorManager(this);
+       if (mMgr == null) {
+           Toast.makeText(this, "MirrorMediaManager 未获取到", Toast.LENGTH_LONG).show();
+       }
+
+       // ==== 按钮点击事件（程序化绑定）====
+       Button btnBackupAll  = findViewById(R.id.btnZipAll);
+       Button btnRestoreAll = findViewById(R.id.btnUnzipAll);
+       Button btnRestorePkg = findViewById(R.id.btnUnzipPkg);
+
+       if (btnBackupAll != null) {
+           btnBackupAll.setOnClickListener(this::onBackupAllClicked);
+       }
+       if (btnRestoreAll != null) {
+           btnRestoreAll.setOnClickListener(this::onRestoreAllClicked);
+       }
+       if (btnRestorePkg != null) {
+           btnRestorePkg.setOnClickListener(this::onRestoreOnePkgClicked);
+       }
+   }
+
+   /** 备份全量 /data/data 到 app 私有 out.zip（保持已有逻辑） */
+   public void onBackupAllClicked(View v) {
+       if (mMgr == null) {
+           Toast.makeText(this, "服务不可用", Toast.LENGTH_SHORT).show();
+           return;
+       }
+       final File outZip = new File(getFilesDir(), "out.zip");
+       ioPool.execute(() -> {
+           long bytes = 0;
+           try (OutputStream os = new FileOutputStream(outZip)) {
+               Log.i(TAG, "开始备份: /data/data -> " + outZip.getAbsolutePath());
+               mMgr.streamFolderZip("/data/data", os);
+               os.flush();
+               bytes = outZip.length();
+               Log.i(TAG, "备份完成, 写入字节=" + bytes);
+               long fb = bytes;
+               runOnUiThread(() ->
+                       Toast.makeText(this, "备份完成: " + outZip.getAbsolutePath() + " (" + fb + " bytes)", Toast.LENGTH_LONG).show()
+               );
+           } catch (Throwable t) {
+               Log.e(TAG, "备份失败", t);
+               long fb = bytes;
+               runOnUiThread(() ->
+                       Toast.makeText(this, "备份失败: " + t.getMessage() + " (bytes=" + fb + ")", Toast.LENGTH_LONG).show()
+               );
+           }
+       });
+   }
+
+   /** 从 app 私有 in.zip 全量还原到 /data/data */
+   public void onRestoreAllClicked(View v) {
+       restoreFromFileToTarget(new File(getFilesDir(), "in.zip"), "/data/data");
+   }
+
+   /** 从 app 私有 in.zip 仅还原到 /data/data/（单包） */
+   public void onRestoreOnePkgClicked(View v) {
+       EditText et = findViewById(R.id.editPackage);
+       String pkg = et != null ? et.getText().toString().trim() : "";
+       if (pkg.isEmpty()) {
+           Toast.makeText(this, "请输入包名", Toast.LENGTH_SHORT).show();
+           return;
+       }
+       restoreFromFileToTarget(new File(getFilesDir(), "in.zip"), "/data/data/" + pkg);
+   }
+
+   /** 还原实现（文件版）：把 in.zip 导入到 targetLogicalRoot */
+   private void restoreFromFileToTarget(File inZip, String targetLogicalRoot) {
+       if (mMgr == null) {
+           Toast.makeText(this, "服务不可用", Toast.LENGTH_SHORT).show();
+           return;
+       }
+       if (!inZip.exists()) {
+           Toast.makeText(this, "未找到 in.zip: " + inZip.getAbsolutePath(), Toast.LENGTH_LONG).show();
+           return;
+       }
+
+       ioPool.execute(() -> {
+           long bytes = 0;
+           try (InputStream is = new FileInputStream(inZip)) {
+               Log.i(TAG, "开始还原: " + inZip.getAbsolutePath() + " -> " + targetLogicalRoot);
+               mMgr.restoreFromZip(targetLogicalRoot, is);
+               bytes = inZip.length();
+               long fb = bytes;
+               Log.i(TAG, "还原完成, 读取字节=" + fb + " -> " + targetLogicalRoot);
+               runOnUiThread(() ->
+                       Toast.makeText(this, "还原完成 (" + fb + " bytes) -> " + targetLogicalRoot, Toast.LENGTH_LONG).show()
+               );
+           } catch (Throwable t) {
+               Log.e(TAG, "还原失败 -> " + targetLogicalRoot, t);
+               long fb = bytes;
+               runOnUiThread(() ->
+                       Toast.makeText(this, "还原失败: " + t.getMessage() + " (bytes=" + fb + ")", Toast.LENGTH_LONG).show()
+               );
+           }
+       });
+   }
+
+   /** 示例：从 URI 还原（如果你用 SAF 选文件，可以调用此方法） */
+   @SuppressWarnings("unused")
+   private void restoreFromUriToTarget(Uri zipUri, String targetLogicalRoot) {
+       if (mMgr == null) {
+           Toast.makeText(this, "服务不可用", Toast.LENGTH_SHORT).show();
+           return;
+       }
+       ioPool.execute(() -> {
+           long bytes = 111;
+           try (InputStream is = getContentResolver().openInputStream(zipUri)) {
+               Log.i(TAG, "开始还原(URI): " + zipUri + " -> " + targetLogicalRoot);
+               mMgr.restoreFromZip(targetLogicalRoot, is);
+               long fb = bytes;
+               runOnUiThread(() ->
+                       Toast.makeText(this, "还原完成(URI) (" + fb + " bytes) -> " + targetLogicalRoot, Toast.LENGTH_LONG).show()
+               );
+           } catch (Throwable t) {
+               Log.e(TAG, "还原失败(URI) -> " + targetLogicalRoot, t);
+               long fb = bytes;
+               runOnUiThread(() ->
+                       Toast.makeText(this, "还原失败(URI): " + t.getMessage() + " (bytes=" + fb + ")", Toast.LENGTH_LONG).show()
+               );
+           }
+       });
+   }
+
+   /** 获取服务（兼容两种写法） */
+   private static MirrorMediaManager getMirrorManager(Context ctx) {
+       try {
+           Object o = ctx.getSystemService("mirrormedia"); // 你在 SystemServiceRegistry 注册的 name
+           if (o instanceof MirrorMediaManager) return (MirrorMediaManager) o;
+       } catch (Throwable ignored) { }
+       try {
+           return ctx.getSystemService(MirrorMediaManager.class);
+       } catch (Throwable ignored) { }
+       return null;
+   }
+
+   @Override
+   protected void onDestroy() {
+       super.onDestroy();
+       ioPool.shutdownNow();
+   }
+}
+

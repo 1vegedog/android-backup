@@ -1,0 +1,14 @@
+cc_binary {
+    name: "mirrormediad",
+    srcs: ["mirrormediad.cpp"],
+    
+    shared_libs: [
+        "libselinux",
+        "liblog",
+        "libbase",
+        "libziparchive",
+    ],
+    cflags: ["-Wall", "-Werror", "-Wextra",],
+    init_rc: ["mirrormediad.rc"],
+}
+
