@@ -25,6 +25,8 @@ import java.io.OutputStream;
 import java.io.FileDescriptor;
 import java.nio.charset.StandardCharsets;
 
+
+
 /**
  * SystemServer-side service that proxies to native daemon "mirrormediad".
  */
@@ -32,6 +34,7 @@ public final class MirrorMediaService extends SystemService {
 
     private static final String TAG = "MirrorMediaService";
     private static final String SOCK = "mirrormediad"; // abstract @mirrormediad
+    private static final int UID_SKIP_NOT_INSTALLED = -2;
 
     public MirrorMediaService(Context context) {
         super(context);
@@ -103,10 +106,15 @@ public final class MirrorMediaService extends SystemService {
             }
 
             final int uid = resolveUidForLogical(logicalTarget);
-            if (uid < 0) {
-                Slog.e(TAG, "restoreFromZip: could not resolve UID for " + logicalTarget);
-                return false;
+            if (uid == UID_SKIP_NOT_INSTALLED) {
+                Slog.e(TAG, "restoreFromZip: skip (package not installed) " + logicalTarget);
+                return true;
             }
+            
+            if (uid < 0) {
+   		Slog.e(TAG, "restoreFromZip: could not resolve UID for " + logicalTarget);
+    		return false;
+	    }
 
             try (LocalSocket socket = new LocalSocket()) {
                 socket.connect(new LocalSocketAddress(SOCK, LocalSocketAddress.Namespace.ABSTRACT));
@@ -191,8 +199,15 @@ public final class MirrorMediaService extends SystemService {
                 Slog.e(TAG, "restoreFromRaw: unsupported logical target " + logicalTarget);
                 return false;
             }
+            
+            
 
             final int appUid = resolveUidForLogical(logicalTarget);
+            if (appUid == UID_SKIP_NOT_INSTALLED) {
+                Slog.e(TAG, "restoreFromZip: skip (package not installed) " + logicalTarget);
+                return true;
+            }
+            
             if (appUid < 0) {
                 Slog.e(TAG, "restoreFromRaw: failed to resolve UID for " + logicalTarget);
                 return false;
@@ -268,7 +283,7 @@ public final class MirrorMediaService extends SystemService {
          * @param logical 逻辑路径
          * @return UID，失败返回 -1
          */
-        private int resolveUidForLogical(String logical) {
+    private int resolveUidForLogical(String logical) {
     final String pkg = parsePkgFromLogical(logical);
     final int callingUid = Binder.getCallingUid();
     final int userId = UserHandle.getUserId(callingUid);
@@ -308,10 +323,25 @@ public final class MirrorMediaService extends SystemService {
             try {
                 StructStat st = Os.stat(statPath);
                 int uid = (int) st.st_uid;
-                Slog.i(TAG, "resolveUidForLogical(stat): path=" + statPath
-                        + " -> uid=" + uid);
-                return uid;
-            } catch (ErrnoException e) {
+                // 如果目标是某个 pkg，则校验该 uid 当前是否仍归属于这个 pkg
+        if (pkg != null) {
+            String[] pkgsForUid = getContext().getPackageManager().getPackagesForUid(uid);
+            boolean match = false;
+            if (pkgsForUid != null) {
+                for (String p : pkgsForUid) {
+                    if (pkg.equals(p)) { match = true; break; }
+                }
+            }
+            if (!match) {
+                Slog.i(TAG, "resolveUidForLogical(stat): uid " + uid
+                        + " does not map to pkg=" + pkg + ", treat as not installed -> skip");
+                return UID_SKIP_NOT_INSTALLED;
+            }
+        }
+
+        Slog.i(TAG, "resolveUidForLogical(stat): path=" + statPath + " -> uid=" + uid);
+        return uid;
+                } catch (ErrnoException e) {
                 Slog.w(TAG, "resolveUidForLogical: Os.stat failed for "
                         + statPath, e);
             }
@@ -319,7 +349,7 @@ public final class MirrorMediaService extends SystemService {
 
         Slog.w(TAG, "resolveUidForLogical: failed for logical=" + logical
                 + " (callingUid=" + callingUid + ", userId=" + userId + ")");
-        return -1;
+        return (pkg != null) ? UID_SKIP_NOT_INSTALLED : -1;
     } finally {
         Binder.restoreCallingIdentity(token);
     }

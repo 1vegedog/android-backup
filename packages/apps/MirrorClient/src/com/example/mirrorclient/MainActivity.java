@@ -69,26 +69,28 @@ public class MainActivity extends Activity {
         // 3) 从本地 files/data_data/<pkg>/ 还原到 /data/data/<pkg>
         btnRestoreDataData.setOnClickListener(v -> {
             String pkg = etPkg.getText().toString().trim();
-            if (pkg.isEmpty()) {
-                toast("请输入包名");
-                return;
-            }
             if (!checkMgr()) return;
-            runBg(() -> MirrorUtil.restoreInternalDataFromLocal(
-                    MainActivity.this, mMgr, pkg, mLogger));
+            runBg(() -> {
+            if(pkg.isEmpty()){
+             	MirrorUtil.restoreAllInternalDataFromLocal(MainActivity.this, mMgr, mLogger);
+            } else {
+            	MirrorUtil.restoreInternalDataFromLocal(MainActivity.this, mMgr, pkg, mLogger);
+            	}
+        });
         });
 
         // 4) 从本地 files/sdcard_data/<pkg>/ 还原到 /sdcard/Android/data/<pkg>
         btnRestoreSdcardData.setOnClickListener(v -> {
             String pkg = etPkg.getText().toString().trim();
-            if (pkg.isEmpty()) {
-                toast("请输入包名");
-                return;
-            }
             if (!checkMgr()) return;
-            runBg(() -> MirrorUtil.restoreExternalDataFromLocal(
-                    MainActivity.this, mMgr, pkg, mLogger));
-        });
+    runBg(() -> {
+        if (pkg.isEmpty()) {
+            MirrorUtil.restoreAllExternalDataFromLocal(MainActivity.this, mMgr, mLogger);
+        } else {
+            MirrorUtil.restoreExternalDataFromLocal(MainActivity.this, mMgr, pkg, mLogger);
+        }
+    });
+});
 
         log("MirrorClient 启动完成");
     }

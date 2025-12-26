@@ -18,6 +18,11 @@ import java.io.IOException;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
+import android.content.pm.PackageManager;
+import android.os.UserHandle;
+import java.util.Arrays;
+import java.util.Comparator;
+
 /**
  * 把 “整棵 /data/data 和 /sdcard/Android/data 的 ZIP 备份 + 本地解压”
  * 以及 “从本地目录用 RAW 协议还原回系统目录” 这几件事封装在这里。
@@ -399,6 +404,68 @@ public final class MirrorUtil {
             log(logger, "RAW: skip special " + dirOrFile.getAbsolutePath());
         }
     }
+    
+    private static boolean isPackageInstalled(Context ctx, String pkg) {
+    try {
+        ctx.getPackageManager().getApplicationInfo(pkg, 0);
+        return true;
+    } catch (PackageManager.NameNotFoundException e) {
+        return false;
+    }
+}
+
+/** 一键恢复：files/data_data 下所有包目录 -> /data/data/<pkg>（未安装跳过） */
+public static void restoreAllInternalDataFromLocal(Context ctx,
+                                                   MirrorMediaManager mgr,
+                                                   Logger logger) {
+    File base = new File(ctx.getFilesDir(), "data_data");
+    if (!base.exists() || !base.isDirectory()) {
+        logErr(logger, "data_data 目录不存在: " + base.getAbsolutePath());
+        return;
+    }
+
+    File[] dirs = base.listFiles(f -> f.isDirectory());
+    if (dirs == null) dirs = new File[0];
+    Arrays.sort(dirs, Comparator.comparing(File::getName));
+
+    log(logger, "开始恢复全部内部数据，共候选目录数: " + dirs.length);
+
+    int ok = 0, skip = 0, fail = 0;
+    for (File d : dirs) {
+        String pkg = d.getName();
+        boolean r = doRawPutFromFolder(d, "/data/data/" + pkg, mgr, logger);
+        if (r) ok++; else fail++;
+    }
+
+    log(logger, "内部数据恢复完成: ok=" + ok + " skip=" + skip + " fail=" + fail);
+}
+
+/** 一键恢复：files/sdcard_data 下所有包目录 -> /sdcard/Android/data/<pkg>（未安装跳过） */
+public static void restoreAllExternalDataFromLocal(Context ctx,
+                                                   MirrorMediaManager mgr,
+                                                   Logger logger) {
+    File base = new File(ctx.getFilesDir(), "sdcard_data");
+    if (!base.exists() || !base.isDirectory()) {
+        logErr(logger, "sdcard_data 目录不存在: " + base.getAbsolutePath());
+        return;
+    }
+
+    File[] dirs = base.listFiles(f -> f.isDirectory());
+    if (dirs == null) dirs = new File[0];
+    Arrays.sort(dirs, Comparator.comparing(File::getName));
+
+    log(logger, "开始恢复全部外部数据(/sdcard/Android/data)，共候选目录数: " + dirs.length);
+
+    int ok = 0, skip = 0, fail = 0;
+    for (File d : dirs) {
+        String pkg = d.getName();
+
+        boolean r = doRawPutFromFolder(d, "/sdcard/Android/data/" + pkg, mgr, logger);
+        if (r) ok++; else fail++;
+    }
+
+    log(logger, "外部数据恢复完成: ok=" + ok + " skip=" + skip + " fail=" + fail);
+}
 
     private static String relPathOf(File base, File file) throws IOException {
         String b = base.getCanonicalPath();
