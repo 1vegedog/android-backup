@@ -13,5 +13,11 @@ interface IMirrorMediaService {
 	void streamFolderRaw(String logicalPath, in ParcelFileDescriptor outPfd);
 	
 	boolean restoreFromRaw(String logicalTarget, in ParcelFileDescriptor inPfd);
+
+	// ================= Personal data backup/restore (Android 11) =================
+	// types: bitmask defined in MirrorMediaManager (TYPE_SMS/TYPE_CALLLOG/TYPE_CALENDAR/...)
+	// opts: optional parameters (e.g., userId)
+	void backupPersonalData(int types, in ParcelFileDescriptor outFd, in Bundle opts);
+	boolean restorePersonalData(int types, in ParcelFileDescriptor inFd, in Bundle opts);
 }
 

@@ -1,56 +1,50 @@
 package com.example.mirrorclient;
 
+import android.app.mirror.MirrorMediaManager;
 import android.content.Context;
+import android.os.Bundle;
 import android.os.RemoteException;
 import android.util.Log;
-import android.app.mirror.MirrorMediaManager;
 
 import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
 import java.io.DataOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
-import java.io.PipedInputStream;
-import java.io.PipedOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.io.IOException;
+import java.io.PipedInputStream;
+import java.io.PipedOutputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.Enumeration;
 import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 import java.util.zip.ZipInputStream;
-
-import android.content.pm.PackageManager;
-import android.os.UserHandle;
-import java.util.Arrays;
-import java.util.Comparator;
+import java.util.zip.ZipOutputStream;
 
 /**
- * 把 “整棵 /data/data 和 /sdcard/Android/data 的 ZIP 备份 + 本地解压”
- * 以及 “从本地目录用 RAW 协议还原回系统目录” 这几件事封装在这里。
- *
- * 使用方法：
- *   // 1) 备份整棵 /data/data
- *   MirrorUtil.backupAllInternalDataViaZip(ctx, mMgr, logger);
- *
- *   // 2) 备份整棵 /sdcard/Android/data
- *   MirrorUtil.backupAllExternalDataViaZip(ctx, mMgr, logger);
- *
- *   // 3) 从 files/data_data/<pkg>/ 还原到 /data/data/<pkg>
- *   MirrorUtil.restoreInternalDataFromLocal(ctx, mMgr, "com.xxx.app", logger);
- *
- *   // 4) 从 files/sdcard_data/<pkg>/ 还原到 /sdcard/Android/data/<pkg>
- *   MirrorUtil.restoreExternalDataFromLocal(ctx, mMgr, "com.xxx.app", logger);
- *
- * 建议在后台线程调用（这些操作会读写大量文件）。
+ * 目录 ZIP 备份 + 本地解压；PIM folder-mode；本地目录 RAW 恢复。
  */
 public final class MirrorUtil {
 
     private static final String TAG = "MirrorUtil";
 
+    /**
+     * 调试开关：true 时保留 *_in.zip / *_tmp.zip，并输出 zip 条目与汇总，便于定位
+     * “只有 meta 没有 media/images 文件 entry” 这类问题。
+     */
+    private static final boolean KEEP_DEBUG_ZIP = true;
+
+    /** 打印 zip 前多少条 entry */
+    private static final int ZIP_LIST_LOG_LIMIT = 120;
+
+    /** 调试保留 zip 的副本目录：/sdcard/Android/data/<pkg>/files/ 下 */
+    private static final boolean COPY_DEBUG_ZIP_TO_EXTERNAL = true;
+
     private MirrorUtil() {}
 
-    /**
-     * 让调用方可以把日志同步到 UI（例如 TextView）。
-     */
     public interface Logger {
         void log(String msg);
         void logErr(String msg);
@@ -70,37 +64,24 @@ public final class MirrorUtil {
     //  一、ZIP 备份 /data/data  与 /sdcard/Android/data
     // =========================================================
 
-    /**
-     * 备份整棵 /data/data：
-     *   /data/data  ->  app files/out_data.zip -> 解压到 app files/data_data/
-     */
     public static void backupAllInternalDataViaZip(Context ctx,
                                                    MirrorMediaManager mgr,
                                                    Logger logger) {
         File appFiles = ctx.getFilesDir();
         File tmpZip  = new File(appFiles, "out_data.zip");
         File dest    = new File(appFiles, "data_data");
-
         copyDirIntoAppFilesViaZip("/data/data", tmpZip, dest, mgr, logger);
     }
 
-    /**
-     * 备份整棵 /sdcard/Android/data：
-     *   /sdcard/Android/data -> app files/out_extData.zip -> 解压到 app files/sdcard_data/
-     */
     public static void backupAllExternalDataViaZip(Context ctx,
                                                    MirrorMediaManager mgr,
                                                    Logger logger) {
         File appFiles = ctx.getFilesDir();
         File tmpZip  = new File(appFiles, "out_extData.zip");
         File dest    = new File(appFiles, "sdcard_data");
-
         copyDirIntoAppFilesViaZip("/sdcard/Android/data", tmpZip, dest, mgr, logger);
     }
 
-    /**
-     * 公共实现：把 logicalRoot 通过 ZIP 备份到 tmpZip，再解压到 dest 目录。
-     */
     private static void copyDirIntoAppFilesViaZip(String logicalRoot,
                                                   File tmpZip,
                                                   File dest,
@@ -113,14 +94,13 @@ public final class MirrorUtil {
             return;
         }
 
-        // 删除旧 zip，避免长度混淆
         if (tmpZip.exists() && !tmpZip.delete()) {
             logErr(logger, "无法删除旧 zip: " + tmpZip.getAbsolutePath());
         }
 
-        // 1. 通过服务把目录打成 zip 写入 tmpZip
+        // 1) 服务端目录 -> zip 写入 tmpZip
         try (FileOutputStream fos = new FileOutputStream(tmpZip)) {
-            log(logger, "调用 mMgr.streamFolderZip 之前");
+            log(logger, "调用 mMgr.streamFolderZip: " + logicalRoot);
             mgr.streamFolderZip(logicalRoot, fos);
             log(logger, "mMgr.streamFolderZip 返回");
         } catch (RemoteException re) {
@@ -134,52 +114,49 @@ public final class MirrorUtil {
             return;
         }
 
-        // 2. 等待 zip 长度稳定（防止刚写完就解压，出现 0 字节等情况）
-        long zipLen = waitForZipStable(tmpZip, 60_000 /* 60s 超时 */, 200 /* 200ms 检查一次 */, logger);
+        // 2) 等待 zip 大小稳定
+        long zipLen = waitForZipStable(tmpZip, 60_000, 200, logger);
         log(logger, "ZIP 最终大小: " + zipLen + " bytes");
-
         if (zipLen <= 0) {
             logErr(logger, "ZIP 文件为 0 或写入超时，跳过解压");
             return;
         }
 
-        // 3. 解压到目标目录
+        // 3) 解压到 dest
         log(logger, "开始解压到：" + dest.getAbsolutePath());
         try {
             unzipToDir(tmpZip, dest, logger);
             log(logger, "解压完成，目标目录: " + dest.getAbsolutePath());
         } catch (IOException e) {
             logErr(logger, "unzipToDir 失败: " + Log.getStackTraceString(e));
-            // 保留 zip 方便 adb pull 分析
             return;
         }
 
-        // 4. 可选：删除临时 zip
-        boolean deleted = tmpZip.delete();
-        log(logger, "删除临时 zip: " + deleted);
+        // 4) 删除临时 zip（可保留用于 adb pull 排查）
+        if (KEEP_DEBUG_ZIP) {
+            log(logger, "KEEP_DEBUG_ZIP=true，保留临时 zip: " + tmpZip.getAbsolutePath()
+                    + " size=" + tmpZip.length());
+        } else {
+            boolean deleted = tmpZip.delete();
+            log(logger, "删除临时 zip: " + deleted);
+        }
     }
 
-    /**
-     * 等待 zip 文件 “大小稳定”，避免在压缩未完成时就去解压。
-     */
     private static long waitForZipStable(File zipFile,
                                          long timeoutMs,
                                          long intervalMs,
                                          Logger logger) {
         long start = System.currentTimeMillis();
         long lastLen = -1;
-        long curLen;
         int stableCount = 0;
 
         while (true) {
-            curLen = zipFile.length();
+            long curLen = zipFile.length();
             log(logger, "等待 ZIP 完成: 当前大小=" + curLen + " bytes");
 
             if (curLen > 0 && curLen == lastLen) {
                 stableCount++;
-                if (stableCount >= 3) { // 连续 3 次大小不变，认为稳定
-                    break;
-                }
+                if (stableCount >= 3) break;
             } else {
                 stableCount = 0;
                 lastLen = curLen;
@@ -198,28 +175,18 @@ public final class MirrorUtil {
                 break;
             }
         }
-
         return zipFile.length();
     }
 
-    /**
-     * 把 zipFile 解压到 destDir，保留 zip 内的相对路径结构。
-     */
     private static void unzipToDir(File zipFile, File destDir, Logger logger) throws IOException {
         log(logger, "unzipToDir: " + zipFile + " -> " + destDir);
-        log(logger, "ZIP 文件大小: " + zipFile.length() + " bytes");
 
-        if (!destDir.exists()) {
-            if (!destDir.mkdirs()) {
-                throw new IOException("无法创建目录: " + destDir);
-            }
+        if (!destDir.exists() && !destDir.mkdirs()) {
+            throw new IOException("无法创建目录: " + destDir);
         }
         if (!destDir.isDirectory()) {
             throw new IOException("目标不是目录: " + destDir);
         }
-
-        int fileCount = 0;
-        int dirCount = 0;
 
         try (FileInputStream fis = new FileInputStream(zipFile);
              ZipInputStream zis = new ZipInputStream(new BufferedInputStream(fis))) {
@@ -229,9 +196,8 @@ public final class MirrorUtil {
 
             while ((entry = zis.getNextEntry()) != null) {
                 String name = entry.getName();
-                log(logger, "解压条目: " + name + " (isDir=" + entry.isDirectory() + ")");
 
-                // 简单防御：不允许绝对路径和包含 .. 的路径
+                // 防止 ZipSlip
                 if (name.startsWith("/") || name.contains("..")) {
                     logErr(logger, "跳过可疑条目: " + name);
                     zis.closeEntry();
@@ -241,52 +207,177 @@ public final class MirrorUtil {
                 File outFile = new File(destDir, name);
 
                 if (entry.isDirectory()) {
-                    if (!outFile.exists()) {
-                        if (!outFile.mkdirs()) {
-                            logErr(logger, "创建目录失败: " + outFile);
-                            zis.closeEntry();
-                            continue;
-                        }
+                    if (!outFile.exists() && !outFile.mkdirs()) {
+                        logErr(logger, "创建目录失败: " + outFile);
                     }
-                    dirCount++;
                 } else {
                     File parent = outFile.getParentFile();
-                    if (parent != null && !parent.exists()) {
-                        if (!parent.mkdirs()) {
-                            logErr(logger, "创建父目录失败: " + parent);
-                            zis.closeEntry();
-                            continue;
-                        }
+                    if (parent != null && !parent.exists() && !parent.mkdirs()) {
+                        logErr(logger, "创建父目录失败: " + parent);
+                        zis.closeEntry();
+                        continue;
                     }
-
                     try (FileOutputStream fos = new FileOutputStream(outFile)) {
                         int n;
-                        long totalBytes = 0;
                         while ((n = zis.read(buf)) > 0) {
                             fos.write(buf, 0, n);
-                            totalBytes += n;
                         }
                         fos.flush();
-                        log(logger, "  -> 写入文件: " + outFile.getName() + " (" + totalBytes + " bytes)");
-                        fileCount++;
-                    } catch (IOException e) {
-                        logErr(logger, "写入文件失败 " + outFile + ": " + e.getMessage());
                     }
                 }
                 zis.closeEntry();
             }
         }
-
-        log(logger, "解压完成：" + dirCount + " 个目录，" + fileCount + " 个文件");
     }
 
     // =========================================================
-    //  二、RAW 从本地恢复 /data/data/<pkg> 和 /sdcard/Android/data/<pkg>
+    //  二、PIM folder-mode（SMS/CallLog/Calendar/Contacts/Media）
     // =========================================================
 
     /**
-     * 从本 app 私有目录 files/data_data/<pkg>/ 恢复到 /data/data/<pkg>
+     * 服务端导出 personal-data ZIP -> 解压到 files/<folderName>/，并删除临时 zip
      */
+    public static void backupPimToFolder(Context ctx,
+                                         MirrorMediaManager mgr,
+                                         int types,
+                                         String folderName,
+                                         Logger logger) {
+        File appFiles = ctx.getFilesDir();
+        File tmpZip  = new File(appFiles, folderName + "_tmp.zip");
+        File destDir = new File(appFiles, folderName);
+
+        log(logger, "PIM备份到目录: folder=" + folderName + " types=" + types
+                + " dest=" + destDir.getAbsolutePath());
+
+        if (mgr == null) {
+            logErr(logger, "MirrorMediaManager 为 null，无法调用服务");
+            return;
+        }
+
+        if (destDir.exists()) {
+            boolean ok = deleteRecursive(destDir);
+            log(logger, "删除旧目录 " + destDir.getAbsolutePath() + " => " + ok);
+        }
+        if (!destDir.mkdirs()) {
+            logErr(logger, "无法创建目录: " + destDir.getAbsolutePath());
+            return;
+        }
+
+        if (tmpZip.exists() && !tmpZip.delete()) {
+            logErr(logger, "无法删除旧临时zip: " + tmpZip.getAbsolutePath());
+        }
+
+        // 1) FD 直传：backupPersonalData -> tmpZip
+        try (FileOutputStream fos = new FileOutputStream(tmpZip)) {
+            Bundle opts = new Bundle();
+            log(logger, "调用 backupPersonalData 开始 -> " + tmpZip.getAbsolutePath());
+            mgr.backupPersonalData(types, fos.getFD(), opts);
+            log(logger, "backupPersonalData 返回");
+        } catch (Throwable t) {
+            logErr(logger, "backupPersonalData 失败: " + Log.getStackTraceString(t));
+            return;
+        }
+
+        // 2) 等待 zip 稳定
+        long zipLen = waitForZipStable(tmpZip, 60_000, 200, logger);
+        log(logger, "临时ZIP最终大小: " + zipLen + " bytes");
+        if (zipLen <= 0) {
+            logErr(logger, "临时ZIP为0或写入超时，终止");
+            return;
+        }
+
+        // 3) 解压到 files/<folderName>/
+        try {
+            unzipToDir(tmpZip, destDir, logger);
+            log(logger, "PIM解压完成 => " + destDir.getAbsolutePath());
+        } catch (IOException e) {
+            logErr(logger, "解压失败: " + Log.getStackTraceString(e));
+            return;
+        } finally {
+            if (KEEP_DEBUG_ZIP) {
+                // 备份侧也可保留，方便检查导出包是不是包含 media/images 文件
+                log(logger, "KEEP_DEBUG_ZIP=true，保留临时zip => " + tmpZip.getAbsolutePath()
+                        + " size=" + tmpZip.length());
+                safeLogZipSummary(tmpZip, logger);
+                safeLogZipEntries(tmpZip, ZIP_LIST_LOG_LIMIT, logger);
+                safeCopyDebugZip(ctx, tmpZip, logger);
+            } else {
+                boolean deleted = tmpZip.delete();
+                log(logger, "删除临时zip => " + deleted);
+            }
+        }
+    }
+
+    /**
+     * files/<folderName>/ -> 临时打包 zip（仅传输）-> restorePersonalData（FD）-> 删除临时 zip
+     */
+    public static boolean restorePimFromFolder(Context ctx,
+                                              MirrorMediaManager mgr,
+                                              int types,
+                                              String folderName,
+                                              boolean clearBeforeRestore,
+                                              Logger logger) {
+        File appFiles = ctx.getFilesDir();
+        File srcDir  = new File(appFiles, folderName);
+        File tmpZip  = new File(appFiles, folderName + "_in.zip");
+
+        log(logger, "PIM从目录恢复: folder=" + folderName + " types=" + types
+                + " src=" + srcDir.getAbsolutePath()
+                + " clearBefore=" + clearBeforeRestore);
+
+        if (mgr == null) {
+            logErr(logger, "MirrorMediaManager 为 null，无法调用服务");
+            return false;
+        }
+
+        if (!srcDir.exists() || !srcDir.isDirectory()) {
+            logErr(logger, "目录不存在或不是目录: " + srcDir.getAbsolutePath());
+            return false;
+        }
+
+        if (tmpZip.exists() && !tmpZip.delete()) {
+            logErr(logger, "无法删除旧临时zip: " + tmpZip.getAbsolutePath());
+            return false;
+        }
+
+        boolean ok = false;
+        try {
+            // 1) 目录 -> zip
+            zipDirToFile(srcDir, tmpZip, logger);
+
+            // 2) 关键：在还原前就把 zip 内容打印出来（不依赖“删不删”）
+            safeLogZipSummary(tmpZip, logger);
+            safeLogZipEntries(tmpZip, ZIP_LIST_LOG_LIMIT, logger);
+            safeCopyDebugZip(ctx, tmpZip, logger);
+
+            // 3) 调用系统服务 restorePersonalData
+            try (FileInputStream fis = new FileInputStream(tmpZip)) {
+                Bundle opts = new Bundle();
+                opts.putBoolean(MirrorMediaManager.OPT_CLEAR_BEFORE_RESTORE, clearBeforeRestore);
+                log(logger, "调用 restorePersonalData 开始");
+                ok = mgr.restorePersonalData(types, fis.getFD(), opts);
+                log(logger, "restorePersonalData 返回 ok=" + ok);
+            }
+
+            return ok;
+        } catch (Throwable t) {
+            logErr(logger, "restorePersonalData失败: " + Log.getStackTraceString(t));
+            return false;
+        } finally {
+            if (KEEP_DEBUG_ZIP) {
+                log(logger, "KEEP_DEBUG_ZIP=true，保留临时zip => " + tmpZip.getAbsolutePath()
+                        + " size=" + tmpZip.length() + " ok=" + ok);
+            } else {
+                boolean deleted = tmpZip.delete();
+                log(logger, "删除临时zip => " + deleted);
+            }
+        }
+    }
+
+    // =========================================================
+    //  三、RAW 从本地恢复 /data/data/<pkg> 与 /sdcard/Android/data/<pkg>
+    // =========================================================
+
     public static boolean restoreInternalDataFromLocal(Context ctx,
                                                        MirrorMediaManager mgr,
                                                        String pkg,
@@ -297,9 +388,6 @@ public final class MirrorUtil {
         return doRawPutFromFolder(root, logicalTarget, mgr, logger);
     }
 
-    /**
-     * 从本 app 私有目录 files/sdcard_data/<pkg>/ 恢复到 /sdcard/Android/data/<pkg>
-     */
     public static boolean restoreExternalDataFromLocal(Context ctx,
                                                        MirrorMediaManager mgr,
                                                        String pkg,
@@ -310,9 +398,6 @@ public final class MirrorUtil {
         return doRawPutFromFolder(root, logicalTarget, mgr, logger);
     }
 
-    /**
-     * 把 localRoot 目录按 RAW 协议打包成流，通过 mMgr.restoreFromRaw() 送给系统服务。
-     */
     private static boolean doRawPutFromFolder(File localRoot,
                                               String logicalTarget,
                                               MirrorMediaManager mgr,
@@ -325,7 +410,6 @@ public final class MirrorUtil {
             logErr(logger, "RAW 目录不存在或不是目录: " + localRoot);
             return false;
         }
-
         if (mgr == null) {
             logErr(logger, "MirrorMediaManager 为 null，无法调用服务");
             return false;
@@ -334,29 +418,21 @@ public final class MirrorUtil {
         PipedOutputStream pos = new PipedOutputStream();
         try (PipedInputStream pis = new PipedInputStream(pos, 256 * 1024)) {
 
-            // 生产者线程：遍历 localRoot -> 写 RAW 记录到 pos
             Thread producer = new Thread(() -> {
                 try (DataOutputStream dos = new DataOutputStream(pos)) {
-                    // 魔数
-                    dos.write(new byte[]{'M', 'M', '0', '1'});
-                    // 根目录记录（空路径）
-                    writeDirRecord(dos, "");
-                    // 遍历 localRoot
+                    dos.write(new byte[]{'M', 'M', '0', '1'}); // magic
+                    writeDirRecord(dos, "");                  // root dir
                     streamFolderAsRaw(localRoot, localRoot, dos, logger);
-                    // 结束记录
                     writeEndRecord(dos);
                     dos.flush();
                 } catch (IOException e) {
                     logErr(logger, "RAW 生产流异常: " + e);
                 } finally {
-                    try {
-                        pos.close();
-                    } catch (IOException ignored) {}
+                    try { pos.close(); } catch (IOException ignored) {}
                 }
             }, "mm-raw-producer");
             producer.start();
 
-            // 消费者：把 RAW 流（pis）交给系统服务
             boolean ok;
             try {
                 ok = mgr.restoreFromRaw(logicalTarget, (InputStream) pis);
@@ -365,9 +441,7 @@ public final class MirrorUtil {
                 ok = false;
             }
 
-            try {
-                producer.join();
-            } catch (InterruptedException ignored) {}
+            try { producer.join(); } catch (InterruptedException ignored) {}
 
             log(logger, "RAW 导入完成: ok=" + ok);
             return ok;
@@ -377,7 +451,6 @@ public final class MirrorUtil {
         }
     }
 
-    /** 递归把 dirOrFile 写成 RAW 记录 */
     private static void streamFolderAsRaw(File base,
                                           File dirOrFile,
                                           DataOutputStream dos,
@@ -385,87 +458,17 @@ public final class MirrorUtil {
         if (dirOrFile.isDirectory()) {
             String rel = relPathOf(base, dirOrFile);
             if (!rel.isEmpty()) {
-                log(logger, "RAW: D " + rel);
                 writeDirRecord(dos, rel);
-            } else {
-                log(logger, "RAW: root dir " + dirOrFile.getAbsolutePath());
             }
             File[] children = dirOrFile.listFiles();
             if (children != null) {
-                for (File f : children) {
-                    streamFolderAsRaw(base, f, dos, logger);
-                }
+                for (File f : children) streamFolderAsRaw(base, f, dos, logger);
             }
         } else if (dirOrFile.isFile()) {
             String rel = relPathOf(base, dirOrFile);
-            log(logger, "RAW: F " + rel + " size=" + dirOrFile.length());
             writeFileRecord(dos, rel, dirOrFile);
-        } else {
-            log(logger, "RAW: skip special " + dirOrFile.getAbsolutePath());
         }
     }
-    
-    private static boolean isPackageInstalled(Context ctx, String pkg) {
-    try {
-        ctx.getPackageManager().getApplicationInfo(pkg, 0);
-        return true;
-    } catch (PackageManager.NameNotFoundException e) {
-        return false;
-    }
-}
-
-/** 一键恢复：files/data_data 下所有包目录 -> /data/data/<pkg>（未安装跳过） */
-public static void restoreAllInternalDataFromLocal(Context ctx,
-                                                   MirrorMediaManager mgr,
-                                                   Logger logger) {
-    File base = new File(ctx.getFilesDir(), "data_data");
-    if (!base.exists() || !base.isDirectory()) {
-        logErr(logger, "data_data 目录不存在: " + base.getAbsolutePath());
-        return;
-    }
-
-    File[] dirs = base.listFiles(f -> f.isDirectory());
-    if (dirs == null) dirs = new File[0];
-    Arrays.sort(dirs, Comparator.comparing(File::getName));
-
-    log(logger, "开始恢复全部内部数据，共候选目录数: " + dirs.length);
-
-    int ok = 0, skip = 0, fail = 0;
-    for (File d : dirs) {
-        String pkg = d.getName();
-        boolean r = doRawPutFromFolder(d, "/data/data/" + pkg, mgr, logger);
-        if (r) ok++; else fail++;
-    }
-
-    log(logger, "内部数据恢复完成: ok=" + ok + " skip=" + skip + " fail=" + fail);
-}
-
-/** 一键恢复：files/sdcard_data 下所有包目录 -> /sdcard/Android/data/<pkg>（未安装跳过） */
-public static void restoreAllExternalDataFromLocal(Context ctx,
-                                                   MirrorMediaManager mgr,
-                                                   Logger logger) {
-    File base = new File(ctx.getFilesDir(), "sdcard_data");
-    if (!base.exists() || !base.isDirectory()) {
-        logErr(logger, "sdcard_data 目录不存在: " + base.getAbsolutePath());
-        return;
-    }
-
-    File[] dirs = base.listFiles(f -> f.isDirectory());
-    if (dirs == null) dirs = new File[0];
-    Arrays.sort(dirs, Comparator.comparing(File::getName));
-
-    log(logger, "开始恢复全部外部数据(/sdcard/Android/data)，共候选目录数: " + dirs.length);
-
-    int ok = 0, skip = 0, fail = 0;
-    for (File d : dirs) {
-        String pkg = d.getName();
-
-        boolean r = doRawPutFromFolder(d, "/sdcard/Android/data/" + pkg, mgr, logger);
-        if (r) ok++; else fail++;
-    }
-
-    log(logger, "外部数据恢复完成: ok=" + ok + " skip=" + skip + " fail=" + fail);
-}
 
     private static String relPathOf(File base, File file) throws IOException {
         String b = base.getCanonicalPath();
@@ -476,7 +479,157 @@ public static void restoreAllExternalDataFromLocal(Context ctx,
         return rel.replace(File.separatorChar, '/');
     }
 
-    // ================= RAW 协议写入（LE） =================
+    // =========================================================
+    //  helpers: delete / zipDir / RAW record writers
+    // =========================================================
+
+    private static boolean deleteRecursive(File f) {
+        if (f == null || !f.exists()) return true;
+        if (f.isDirectory()) {
+            File[] children = f.listFiles();
+            if (children != null) {
+                for (File c : children) deleteRecursive(c);
+            }
+        }
+        return f.delete();
+    }
+
+    /**
+     * 目录 -> zip：递归打包所有文件（包括二进制图片）。
+     * entry 名称是相对 srcDir 的相对路径，示例：media/images/xxx.jpg
+     */
+    private static void zipDirToFile(File srcDir, File outZip, Logger logger) throws IOException {
+        log(logger, "zipDirToFile: " + srcDir.getAbsolutePath() + " -> " + outZip.getAbsolutePath());
+        try (FileOutputStream fos = new FileOutputStream(outZip);
+             ZipOutputStream zos = new ZipOutputStream(new BufferedOutputStream(fos))) {
+            String basePath = srcDir.getCanonicalPath();
+            addFileToZip(zos, srcDir, basePath);
+            zos.finish();
+        }
+        log(logger, "zipDirToFile done: " + outZip.getAbsolutePath() + " size=" + outZip.length());
+    }
+
+    private static void addFileToZip(ZipOutputStream zos, File f, String basePath) throws IOException {
+        String path = f.getCanonicalPath();
+        String rel = path.equals(basePath) ? "" : path.substring(basePath.length() + 1);
+        rel = rel.replace("\\", "/");
+
+        if (f.isDirectory()) {
+            File[] children = f.listFiles();
+            if (children != null) {
+                for (File c : children) addFileToZip(zos, c, basePath);
+            }
+            return;
+        }
+
+        if (rel.isEmpty()) return;
+
+        ZipEntry e = new ZipEntry(rel);
+        zos.putNextEntry(e);
+        try (FileInputStream fis = new FileInputStream(f)) {
+            byte[] buf = new byte[256 * 1024];
+            int n;
+            while ((n = fis.read(buf)) > 0) zos.write(buf, 0, n);
+        }
+        zos.closeEntry();
+    }
+
+    // ---------------- Debug zip helpers ----------------
+
+    private static void safeLogZipSummary(File zip, Logger logger) {
+        try {
+            logZipSummary(zip, logger);
+        } catch (Throwable t) {
+            logErr(logger, "logZipSummary failed: " + Log.getStackTraceString(t));
+        }
+    }
+
+    private static void safeLogZipEntries(File zip, int limit, Logger logger) {
+        try {
+            logZipEntries(zip, limit, logger);
+        } catch (Throwable t) {
+            logErr(logger, "logZipEntries failed: " + Log.getStackTraceString(t));
+        }
+    }
+
+    private static void safeCopyDebugZip(Context ctx, File zip, Logger logger) {
+        if (!KEEP_DEBUG_ZIP || !COPY_DEBUG_ZIP_TO_EXTERNAL) return;
+        if (zip == null || !zip.exists()) return;
+
+        File ext = ctx.getExternalFilesDir(null);
+        if (ext == null) {
+            logErr(logger, "externalFilesDir is null, skip copy debug zip");
+            return;
+        }
+        File dst = new File(ext, zip.getName());
+        try {
+            copyFile(zip, dst);
+            log(logger, "DEBUG zip copied => " + dst.getAbsolutePath() + " size=" + dst.length());
+        } catch (Throwable t) {
+            logErr(logger, "copy debug zip failed: " + Log.getStackTraceString(t));
+        }
+    }
+
+    private static void logZipSummary(File zip, Logger logger) throws IOException {
+        if (zip == null || !zip.exists()) {
+            logErr(logger, "logZipSummary: zip not exist: " + zip);
+            return;
+        }
+        int total = 0;
+        int img = 0;
+        boolean hasMeta = false;
+        long sumSize = 0;
+
+        try (ZipFile zf = new ZipFile(zip)) {
+            Enumeration<? extends ZipEntry> en = zf.entries();
+            while (en.hasMoreElements()) {
+                ZipEntry e = en.nextElement();
+                total++;
+                String name = e.getName();
+                long sz = e.getSize();
+                if (sz > 0) sumSize += sz;
+                if ("media/images_meta.jsonl".equals(name)) hasMeta = true;
+                if (name != null && name.startsWith("media/images/")) img++;
+            }
+        }
+
+        log(logger, "ZIP summary: path=" + zip.getAbsolutePath()
+                + " zipBytes=" + zip.length()
+                + " entries=" + total
+                + " mediaImagesEntries=" + img
+                + " hasImagesMeta=" + hasMeta
+                + " sumEntrySize=" + sumSize);
+    }
+
+    private static void logZipEntries(File zip, int limit, Logger logger) throws IOException {
+        if (zip == null || !zip.exists()) {
+            logErr(logger, "logZipEntries: zip not exist: " + zip);
+            return;
+        }
+        int i = 0;
+        try (ZipFile zf = new ZipFile(zip)) {
+            Enumeration<? extends ZipEntry> en = zf.entries();
+            while (en.hasMoreElements() && i < limit) {
+                ZipEntry e = en.nextElement();
+                log(logger, "ZIP[" + i + "] " + e.getName() + " size=" + e.getSize());
+                i++;
+            }
+        }
+        log(logger, "ZIP entries printed=" + i + " (limit=" + limit + ") path=" + zip.getAbsolutePath());
+    }
+
+    private static void copyFile(File src, File dst) throws IOException {
+        if (src == null || dst == null) throw new IOException("copyFile: null");
+        try (InputStream in = new BufferedInputStream(new FileInputStream(src));
+             OutputStream out = new BufferedOutputStream(new FileOutputStream(dst))) {
+            byte[] buf = new byte[256 * 1024];
+            int r;
+            while ((r = in.read(buf)) > 0) out.write(buf, 0, r);
+            out.flush();
+        }
+    }
+
+    // ---- RAW record format (LE) ----
 
     private static void writeDirRecord(DataOutputStream dos, String rel) throws IOException {
         dos.writeByte('D');
@@ -484,23 +637,21 @@ public static void restoreAllExternalDataFromLocal(Context ctx,
         le32(dos, 0700);
         le64(dos, 0L);
         le64(dos, 0L);
-        dos.write(rel.getBytes("UTF-8"));
+        dos.write(rel.getBytes(StandardCharsets.UTF_8));
     }
 
-    private static void writeFileRecord(DataOutputStream dos, String rel, File file)
-            throws IOException {
+    private static void writeFileRecord(DataOutputStream dos, String rel, File file) throws IOException {
         dos.writeByte('F');
         le16(dos, rel.length());
         le32(dos, 0600);
         le64(dos, file.lastModified() / 1000L);
         le64(dos, file.length());
-        dos.write(rel.getBytes("UTF-8"));
+        dos.write(rel.getBytes(StandardCharsets.UTF_8));
+
         try (InputStream is = new FileInputStream(file)) {
             byte[] buf = new byte[256 * 1024];
             int n;
-            while ((n = is.read(buf)) > 0) {
-                dos.write(buf, 0, n);
-            }
+            while ((n = is.read(buf)) > 0) dos.write(buf, 0, n);
         }
     }
 

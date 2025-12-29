@@ -682,10 +682,11 @@
         android:description="@string/permgroupdesc_contacts"
         android:priority="100" />
 
-    <!-- Allows an appliction to copy/write files across app sandbox.
+    <!-- add by DTL,Allows an appliction to copy/write files across app sandbox.
+         
     -->
     <permission
-        android:name="android.permission.MIRROR_MEDIA"
+        android:name="com.MirrorBackup.permission.MIRROR_MEDIA"
         android:protectionLevel="signature|privileged"
         android:label="@string/permlab_mirror_media"
         android:description="@string/permdesc_mirror_media" />
@@ -1246,14 +1247,6 @@
         android:label="@string/permlab_recordAudio"
         android:description="@string/permdesc_recordAudio"
         android:protectionLevel="dangerous|instant" />
-        
-    <!-- Add code by dtl
-    	<p>Protection level: signature
-    	@hide Permission for Mirror media backup system service. -->
-    -->
-    <permission 
-    	android:name="com.MirrorBackup.permission.MIRROR_MEDIA"
-    	android:protectionLevel="signature" />
     	
 
     <!-- ====================================================================== -->
@@ -3210,6 +3203,10 @@
     -->
     <permission android:name="android.permission.INJECT_EVENTS"
         android:protectionLevel="signature" />
+        
+    <!-- @hide Allows system services to manage app verification settings -->
+<permission android:name="android.permission.MANAGE_APP_VERIFICATION"
+    android:protectionLevel="signature|privileged" />
 
     <!-- @hide Allows an application to register an input filter which filters the stream
          of user events (keys, touch, trackball) before they are dispatched to any window. -->

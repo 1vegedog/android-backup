@@ -16,9 +16,115 @@ import java.io.OutputStream;
 public final class MirrorMediaManager {
     private final IMirrorMediaService mService;
 
+    // ================= Personal data types (bitmask) =================
+    public static final int TYPE_CONTACTS = 1 << 0; // reserved
+    public static final int TYPE_CALLLOG  = 1 << 1;
+    public static final int TYPE_SMS      = 1 << 2;
+    public static final int TYPE_CALENDAR = 1 << 3;
+    public static final int TYPE_MEDIA    = 1 << 4; // reserved
+
+    public static final int TYPE_PIM_BASIC = TYPE_CALLLOG | TYPE_SMS | TYPE_CALENDAR;
+    public static final int TYPE_ALL      = TYPE_CONTACTS | TYPE_CALLLOG | TYPE_SMS | TYPE_CALENDAR | TYPE_MEDIA;
+
+    // Bundle opts keys
+    public static final String OPT_USER_ID = "userId"; // int
+    public static final String OPT_CLEAR_BEFORE_RESTORE = "clearBeforeRestore"; // boolean
+
     // SystemServiceRegistry 里用 IBinder 构造
     public MirrorMediaManager(IBinder binder) {
         mService = IMirrorMediaService.Stub.asInterface(binder);
+    }
+
+    // =====================================================================
+    //  Personal data backup/restore (FD + Stream)
+    // =====================================================================
+
+    public void backupPersonalData(int types, FileDescriptor out, android.os.Bundle opts)
+            throws RemoteException, IOException {
+        ParcelFileDescriptor pfd = ParcelFileDescriptor.dup(out);
+        try {
+            mService.backupPersonalData(types, pfd, opts);
+        } finally {
+            try { pfd.close(); } catch (IOException ignored) {}
+        }
+    }
+
+    public void backupPersonalData(int types, OutputStream os, android.os.Bundle opts)
+            throws RemoteException, IOException {
+        if (os instanceof FileOutputStream) {
+            FileDescriptor fd = ((FileOutputStream) os).getFD();
+            backupPersonalData(types, fd, opts);
+            return;
+        }
+
+        ParcelFileDescriptor[] pipe = ParcelFileDescriptor.createPipe();
+        ParcelFileDescriptor readEnd  = pipe[0];
+        ParcelFileDescriptor writeEnd = pipe[1];
+
+        try {
+            mService.backupPersonalData(types, writeEnd, opts);
+        } finally {
+            try { writeEnd.close(); } catch (IOException ignored) {}
+        }
+
+        try (FileInputStream fis = new FileInputStream(readEnd.getFileDescriptor())) {
+            byte[] buf = new byte[256 * 1024];
+            int n;
+            while ((n = fis.read(buf)) > 0) {
+                os.write(buf, 0, n);
+            }
+            os.flush();
+        } finally {
+            try { readEnd.close(); } catch (IOException ignored) {}
+        }
+    }
+
+    public boolean restorePersonalData(int types, FileDescriptor inFd, android.os.Bundle opts)
+            throws RemoteException, IOException {
+        ParcelFileDescriptor pfd = ParcelFileDescriptor.dup(inFd);
+        try {
+            return mService.restorePersonalData(types, pfd, opts);
+        } finally {
+            try { pfd.close(); } catch (IOException ignored) {}
+        }
+    }
+
+    public boolean restorePersonalData(int types, InputStream in, android.os.Bundle opts)
+            throws RemoteException, IOException {
+        ParcelFileDescriptor[] pipe = ParcelFileDescriptor.createPipe();
+        ParcelFileDescriptor readEnd  = pipe[0];
+        ParcelFileDescriptor writeEnd = pipe[1];
+
+        try {
+            Thread t = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    FileOutputStream fos = new FileOutputStream(writeEnd.getFileDescriptor());
+                    try {
+                        byte[] buf = new byte[256 * 1024];
+                        int n;
+                        while (true) {
+                            n = in.read(buf);
+                            if (n <= 0) break;
+                            fos.write(buf, 0, n);
+                        }
+                        fos.flush();
+                    } catch (IOException ignored) {
+                    } finally {
+                        try { fos.close(); } catch (IOException ignored2) {}
+                    }
+                }
+            }, "mm-pim-writer");
+            t.start();
+
+            boolean ok = mService.restorePersonalData(types, readEnd, opts);
+
+            try { t.join(); } catch (InterruptedException ignored) {}
+            return ok;
+        } finally {
+            try { readEnd.close(); }  catch (IOException ignored) {}
+            try { writeEnd.close(); } catch (IOException ignored) {}
+        }
     }
 
     // ---------------- ZIP 导出（FD 版本） ----------------

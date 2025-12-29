@@ -16,37 +16,91 @@
             android:layout_height="wrap_content"
             android:hint="包名（例如 com.bnyro.recorder）" />
 
-
         <Button
             android:id="@+id/btnZipAll"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="ZIP 导出 /data/data" />
 
-
-
-
         <Button
             android:id="@+id/btnRawDumpAll"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="RAW 导出 /data/data（无压缩）" />
+            android:text="ZIP 导出 /sdcard/Android/data" />
 
- 
-        
-        <Button 
+        <Button
             android:id="@+id/btnRestoreDataData"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="从本地还原/data/data" />
-        
-         <Button 
+            android:text="从本地还原 /data/data/&lt;pkg&gt;（RAW）" />
+
+        <Button
             android:id="@+id/btnRestoreSdcardData"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="从本地还原/sdcard/Android/data" />
+            android:text="从本地还原 /sdcard/Android/data/&lt;pkg&gt;（RAW）" />
 
+        <!-- ============ PIM backup/restore ============ -->
 
+        <Button
+            android:id="@+id/btnBackupSms"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="备份 SMS (folder-mode)" />
+
+        <Button
+            android:id="@+id/btnRestoreSms"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="还原 SMS (folder-mode)" />
+
+        <Button
+            android:id="@+id/btnBackupCalllog"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="备份 通话记录 (folder-mode)" />
+
+        <Button
+            android:id="@+id/btnRestoreCalllog"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="还原 通话记录 (folder-mode)" />
+
+        <Button
+            android:id="@+id/btnBackupCalendar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="备份 日历 (folder-mode)" />
+
+        <Button
+            android:id="@+id/btnRestoreCalendar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="还原 日历 (folder-mode)" />
+
+        <Button
+            android:id="@+id/btnBackupContacts"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="备份 通讯录 (folder-mode)" />
+
+        <Button
+            android:id="@+id/btnRestoreContacts"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="还原 通讯录 (folder-mode)" />
+
+        <Button
+            android:id="@+id/btnBackupMedia"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="备份 照片/媒体 (folder-mode)" />
+
+        <Button
+            android:id="@+id/btnRestoreMedia"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="还原 照片/媒体 (folder-mode)" />
 
         <!-- 简单日志输出 -->
         <TextView

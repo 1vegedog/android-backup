@@ -17,9 +17,6 @@ public class MainActivity extends Activity {
     private EditText etPkg;
     private TextView tvLog;
 
-    /**
-     * 把 MirrorUtil 的日志桥接到 Activity 的 TextView 上
-     */
     private final MirrorUtil.Logger mLogger = new MirrorUtil.Logger() {
         @Override
         public void log(String msg) {
@@ -39,63 +36,169 @@ public class MainActivity extends Activity {
 
         mMgr = (MirrorMediaManager) getSystemService(Context.MIRROR_MEDIA_SERVICE);
 
-        etPkg  = findViewById(R.id.editPackage);
-        tvLog  = findViewById(R.id.textLog);
+        etPkg = findViewById(R.id.editPackage);
+        tvLog = findViewById(R.id.textLog);
 
-        
-        // btnZipAll      -> 备份 /data/data
-        // btnRawDumpAll  -> 备份 /sdcard/Android/data
-        // btnRestoreDataData    -> 从本地还原 /data/data/<pkg>
-        // btnRestoreSdcardData  -> 从本地还原 /sdcard/Android/data/<pkg>
-        Button btnZipAll           = findViewById(R.id.btnZipAll);
-        Button btnRawDumpAll       = findViewById(R.id.btnRawDumpAll);
-        Button btnRestoreDataData  = findViewById(R.id.btnRestoreDataData);
-        Button btnRestoreSdcardData= findViewById(R.id.btnRestoreSdcardData);
+        // data dirs
+        Button btnZipAll = findViewById(R.id.btnZipAll);
+        Button btnRawDumpAll = findViewById(R.id.btnRawDumpAll);
+        Button btnRestoreDataData = findViewById(R.id.btnRestoreDataData);
+        Button btnRestoreSdcardData = findViewById(R.id.btnRestoreSdcardData);
 
-        // 1) 备份整棵 /data/data 到本 App files/data_data/
+        // PIM
+        Button btnBackupSms = findViewById(R.id.btnBackupSms);
+        Button btnRestoreSms = findViewById(R.id.btnRestoreSms);
+        Button btnBackupCalllog = findViewById(R.id.btnBackupCalllog);
+        Button btnRestoreCalllog = findViewById(R.id.btnRestoreCalllog);
+        Button btnBackupCalendar = findViewById(R.id.btnBackupCalendar);
+        Button btnRestoreCalendar = findViewById(R.id.btnRestoreCalendar);
+        Button btnBackupContacts = findViewById(R.id.btnBackupContacts);
+        Button btnRestoreContacts = findViewById(R.id.btnRestoreContacts);
+        Button btnBackupMedia = findViewById(R.id.btnBackupMedia);
+        Button btnRestoreMedia = findViewById(R.id.btnRestoreMedia);
+
+        // 1) ZIP 备份整棵 /data/data -> files/data_data/
         btnZipAll.setOnClickListener(v -> {
             if (!checkMgr()) return;
+            log("点击：ZIP 导出 /data/data -> files/data_data/");
             runBg(() -> MirrorUtil.backupAllInternalDataViaZip(
                     MainActivity.this, mMgr, mLogger));
         });
 
-        // 2) 备份整棵 /sdcard/Android/data 到本 App files/sdcard_data/
+        // 2) ZIP 备份整棵 /sdcard/Android/data -> files/sdcard_data/
         btnRawDumpAll.setOnClickListener(v -> {
             if (!checkMgr()) return;
+            log("点击：ZIP 导出 /sdcard/Android/data -> files/sdcard_data/");
             runBg(() -> MirrorUtil.backupAllExternalDataViaZip(
                     MainActivity.this, mMgr, mLogger));
         });
 
-        // 3) 从本地 files/data_data/<pkg>/ 还原到 /data/data/<pkg>
+        // 3) RAW 从本地 files/data_data/<pkg>/ 还原到 /data/data/<pkg>
         btnRestoreDataData.setOnClickListener(v -> {
             String pkg = etPkg.getText().toString().trim();
+            if (pkg.isEmpty()) {
+                toast("请输入包名");
+                return;
+            }
             if (!checkMgr()) return;
+            log("点击：RAW 还原 /data/data/" + pkg + " <- files/data_data/" + pkg + "/");
             runBg(() -> {
-            if(pkg.isEmpty()){
-             	MirrorUtil.restoreAllInternalDataFromLocal(MainActivity.this, mMgr, mLogger);
-            } else {
-            	MirrorUtil.restoreInternalDataFromLocal(MainActivity.this, mMgr, pkg, mLogger);
-            	}
-        });
+                boolean ok = MirrorUtil.restoreInternalDataFromLocal(
+                        MainActivity.this, mMgr, pkg, mLogger);
+                log("RAW 还原 /data/data 结束 ok=" + ok);
+            });
         });
 
-        // 4) 从本地 files/sdcard_data/<pkg>/ 还原到 /sdcard/Android/data/<pkg>
+        // 4) RAW 从本地 files/sdcard_data/<pkg>/ 还原到 /sdcard/Android/data/<pkg>
         btnRestoreSdcardData.setOnClickListener(v -> {
             String pkg = etPkg.getText().toString().trim();
+            if (pkg.isEmpty()) {
+                toast("请输入包名");
+                return;
+            }
             if (!checkMgr()) return;
-    runBg(() -> {
-        if (pkg.isEmpty()) {
-            MirrorUtil.restoreAllExternalDataFromLocal(MainActivity.this, mMgr, mLogger);
-        } else {
-            MirrorUtil.restoreExternalDataFromLocal(MainActivity.this, mMgr, pkg, mLogger);
-        }
-    });
-});
+            log("点击：RAW 还原 /sdcard/Android/data/" + pkg + " <- files/sdcard_data/" + pkg + "/");
+            runBg(() -> {
+                boolean ok = MirrorUtil.restoreExternalDataFromLocal(
+                        MainActivity.this, mMgr, pkg, mLogger);
+                log("RAW 还原 /sdcard/Android/data 结束 ok=" + ok);
+            });
+        });
 
-        log("MirrorClient 启动完成");
+        // ===================== PIM folder-mode =====================
+
+        btnBackupSms.setOnClickListener(v -> {
+            if (!checkMgr()) return;
+            log("点击：备份 SMS -> files/SMS/");
+            runBg(() -> MirrorUtil.backupPimToFolder(
+                    MainActivity.this, mMgr, MirrorMediaManager.TYPE_SMS, "SMS", mLogger));
+        });
+
+        btnRestoreSms.setOnClickListener(v -> {
+            if (!checkMgr()) return;
+            log("点击：还原 SMS <- files/SMS/");
+            runBg(() -> {
+                boolean ok = MirrorUtil.restorePimFromFolder(
+                        MainActivity.this, mMgr, MirrorMediaManager.TYPE_SMS,
+                        "SMS", true /*clearBeforeRestore*/, mLogger);
+                log("SMS 还原结束 ok=" + ok);
+            });
+        });
+
+        btnBackupCalllog.setOnClickListener(v -> {
+            if (!checkMgr()) return;
+            log("点击：备份 CallLog -> files/CALLLOG/");
+            runBg(() -> MirrorUtil.backupPimToFolder(
+                    MainActivity.this, mMgr, MirrorMediaManager.TYPE_CALLLOG, "CALLLOG", mLogger));
+        });
+
+        btnRestoreCalllog.setOnClickListener(v -> {
+            if (!checkMgr()) return;
+            log("点击：还原 CallLog <- files/CALLLOG/");
+            runBg(() -> {
+                boolean ok = MirrorUtil.restorePimFromFolder(
+                        MainActivity.this, mMgr, MirrorMediaManager.TYPE_CALLLOG,
+                        "CALLLOG", true /*clearBeforeRestore*/, mLogger);
+                log("通话记录 还原结束 ok=" + ok);
+            });
+        });
+
+        btnBackupCalendar.setOnClickListener(v -> {
+            if (!checkMgr()) return;
+            log("点击：备份 Calendar -> files/CALENDAR/");
+            runBg(() -> MirrorUtil.backupPimToFolder(
+                    MainActivity.this, mMgr, MirrorMediaManager.TYPE_CALENDAR, "CALENDAR", mLogger));
+        });
+
+        btnRestoreCalendar.setOnClickListener(v -> {
+            if (!checkMgr()) return;
+            log("点击：还原 Calendar <- files/CALENDAR/");
+            runBg(() -> {
+                boolean ok = MirrorUtil.restorePimFromFolder(
+                        MainActivity.this, mMgr, MirrorMediaManager.TYPE_CALENDAR,
+                        "CALENDAR", true /*clearBeforeRestore*/, mLogger);
+                log("日历 还原结束 ok=" + ok);
+            });
+        });
+
+        btnBackupContacts.setOnClickListener(v -> {
+            if (!checkMgr()) return;
+            log("点击：备份 Contacts -> files/CONTACTS/");
+            runBg(() -> MirrorUtil.backupPimToFolder(
+                    MainActivity.this, mMgr, MirrorMediaManager.TYPE_CONTACTS, "CONTACTS", mLogger));
+        });
+
+        btnRestoreContacts.setOnClickListener(v -> {
+            if (!checkMgr()) return;
+            log("点击：还原 Contacts <- files/CONTACTS/");
+            runBg(() -> {
+                boolean ok = MirrorUtil.restorePimFromFolder(
+                        MainActivity.this, mMgr, MirrorMediaManager.TYPE_CONTACTS,
+                        "CONTACTS", true /*clearBeforeRestore*/, mLogger);
+                log("通讯录 还原结束 ok=" + ok);
+            });
+        });
+
+        btnBackupMedia.setOnClickListener(v -> {
+            if (!checkMgr()) return;
+            log("点击：备份 Media -> files/MEDIA/");
+            runBg(() -> MirrorUtil.backupPimToFolder(
+                    MainActivity.this, mMgr, MirrorMediaManager.TYPE_MEDIA, "MEDIA", mLogger));
+        });
+
+        btnRestoreMedia.setOnClickListener(v -> {
+            if (!checkMgr()) return;
+            log("点击：还原 Media <- files/MEDIA/");
+            runBg(() -> {
+                boolean ok = MirrorUtil.restorePimFromFolder(
+                        MainActivity.this, mMgr, MirrorMediaManager.TYPE_MEDIA,
+                        "MEDIA", true /*clearBeforeRestore*/, mLogger);
+                log("媒体 还原结束 ok=" + ok);
+            });
+        });
     }
 
-    // ================== 辅助方法 ==================
+    // ================== helpers ==================
 
     private boolean checkMgr() {
         if (mMgr == null) {
