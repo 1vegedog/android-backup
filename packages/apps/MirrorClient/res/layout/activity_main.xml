@@ -1,115 +1,120 @@
 <?xml version="1.0" encoding="utf-8"?>
-<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
-    android:layout_height="match_parent">
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="16dp">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="请选择备份/还原项："
+        android:textSize="18sp"
+        android:textStyle="bold"
+        android:layout_marginBottom="12dp"/>
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:background="#F5F5F5"
+        android:padding="8dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <CheckBox
+                android:id="@+id/cbAppDataInternal"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="应用内部数据 (/data/data) [全量]" />
+
+            <CheckBox
+                android:id="@+id/cbAppDataExternal"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="应用外部数据 (Android/data) [全量]" />
+
+            <CheckBox
+                android:id="@+id/cbSms"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="短信 (系统 DB 模式)" />
+
+            <CheckBox
+                android:id="@+id/cbCallLog"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="通话记录" />
+
+            <CheckBox
+                android:id="@+id/cbContacts"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="通讯录 (Contacts)" />
+
+            <CheckBox
+                android:id="@+id/cbCalendar"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="日历 (Calendar)" />
+
+            <CheckBox
+                android:id="@+id/cbMedia"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="媒体/照片 (Media)" />
+
+        </LinearLayout>
+    </ScrollView>
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="vertical"
-        android:padding="16dp">
-
-        <!-- 包名输入 -->
-        <EditText
-            android:id="@+id/editPackage"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="包名（例如 com.bnyro.recorder）" />
+        android:orientation="horizontal"
+        android:gravity="center"
+        android:layout_marginTop="16dp"
+        android:layout_marginBottom="16dp">
 
         <Button
-            android:id="@+id/btnZipAll"
-            android:layout_width="match_parent"
+            android:id="@+id/btnExecuteBackup"
+            android:layout_width="0dp"
+            android:layout_weight="1"
             android:layout_height="wrap_content"
-            android:text="ZIP 导出 /data/data" />
+            android:text="开始备份"
+            android:backgroundTint="#4CAF50"
+            android:layout_marginEnd="8dp"/>
 
         <Button
-            android:id="@+id/btnRawDumpAll"
-            android:layout_width="match_parent"
+            android:id="@+id/btnExecuteRestore"
+            android:layout_width="0dp"
+            android:layout_weight="1"
             android:layout_height="wrap_content"
-            android:text="ZIP 导出 /sdcard/Android/data" />
+            android:text="开始还原"
+            android:backgroundTint="#FF5722"
+            android:layout_marginStart="8dp"/>
+    </LinearLayout>
 
-        <Button
-            android:id="@+id/btnRestoreDataData"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="从本地还原 /data/data/&lt;pkg&gt;（RAW）" />
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="操作日志："
+        android:textStyle="bold"/>
 
-        <Button
-            android:id="@+id/btnRestoreSdcardData"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="从本地还原 /sdcard/Android/data/&lt;pkg&gt;（RAW）" />
-
-        <!-- ============ PIM backup/restore ============ -->
-
-        <Button
-            android:id="@+id/btnBackupSms"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="备份 SMS (folder-mode)" />
-
-        <Button
-            android:id="@+id/btnRestoreSms"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="还原 SMS (folder-mode)" />
-
-        <Button
-            android:id="@+id/btnBackupCalllog"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="备份 通话记录 (folder-mode)" />
-
-        <Button
-            android:id="@+id/btnRestoreCalllog"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="还原 通话记录 (folder-mode)" />
-
-        <Button
-            android:id="@+id/btnBackupCalendar"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="备份 日历 (folder-mode)" />
-
-        <Button
-            android:id="@+id/btnRestoreCalendar"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="还原 日历 (folder-mode)" />
-
-        <Button
-            android:id="@+id/btnBackupContacts"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="备份 通讯录 (folder-mode)" />
-
-        <Button
-            android:id="@+id/btnRestoreContacts"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="还原 通讯录 (folder-mode)" />
-
-        <Button
-            android:id="@+id/btnBackupMedia"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="备份 照片/媒体 (folder-mode)" />
-
-        <Button
-            android:id="@+id/btnRestoreMedia"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="还原 照片/媒体 (folder-mode)" />
-
-        <!-- 简单日志输出 -->
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="150dp"
+        android:background="#EEE"
+        android:padding="5dp">
         <TextView
             android:id="@+id/textLog"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:textSize="12sp"
-            android:paddingTop="8dp"
-            android:text="log..." />
-    </LinearLayout>
-</ScrollView>
+            android:fontFamily="monospace"
+            android:text="等待操作..." />
+    </ScrollView>
 
+</LinearLayout>
