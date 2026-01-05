@@ -26,16 +26,11 @@
             android:orientation="vertical">
 
             <CheckBox
-                android:id="@+id/cbAppDataInternal"
+                android:id="@+id/cbAppData"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="应用内部数据 (/data/data) [全量]" />
+                android:text="应用内部数据" />
 
-            <CheckBox
-                android:id="@+id/cbAppDataExternal"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="应用外部数据 (Android/data) [全量]" />
 
             <CheckBox
                 android:id="@+id/cbSms"
