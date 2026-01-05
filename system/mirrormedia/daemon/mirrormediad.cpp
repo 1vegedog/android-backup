@@ -25,13 +25,19 @@
 #include <sstream>
 #include <algorithm>
 
-#include <private/android_filesystem_config.h>  // for AID_EXT_DATA_RW
-
+#include <private/android_filesystem_config.h>  // for AID_EXT_DATA_RW, AID_RADIO
 
 extern "C" int selinux_android_restorecon(const char* path, unsigned int flags);
 
 // 抽象域 socket 名
 static const char* kSockName = "mirrormediad";
+
+// SMS DB Paths (Android 11+ User DE storage)
+static const char* SMS_DB_PATH = "/data/user/0/com.android.providers.telephony/databases/mmssms.db";
+static const char* SMS_DB_DIR  = "/data/user/0/com.android.providers.telephony/databases";
+static const char* SMS_DB_WAL  = "/data/user/0/com.android.providers.telephony/databases/mmssms.db-wal";
+static const char* SMS_DB_SHM  = "/data/user/0/com.android.providers.telephony/databases/mmssms.db-shm";
+
 
 // ========== 通用工具 ==========
 
@@ -70,10 +76,8 @@ static std::string dirname_of(const std::string& p) {
 }
 
 static bool sanitize_rel(std::string* rel) {
-    // 去掉开头的 '/'; 禁止出现 ".." 以防逃逸
     while (!rel->empty() && (*rel)[0] == '/') rel->erase(0, 1);
     if (rel->find("..") != std::string::npos) return false;
-    // 统一移除多余的 '//'（简单处理）
     while (rel->find("//") != std::string::npos) {
         rel->erase(rel->find("//"), 1);
     }
@@ -104,7 +108,7 @@ static bool read_fully(int fd, void* p, size_t n) {
     return true;
 }
 static bool w8 (int fd, uint8_t v){ return write_fully(fd, &v, 1); }
-static bool w16(int fd, uint16_t v){ return write_fully(fd, &v, 2); } // 主机是 LE，无需转换
+static bool w16(int fd, uint16_t v){ return write_fully(fd, &v, 2); }
 static bool w32(int fd, uint32_t v){ return write_fully(fd, &v, 4); }
 static bool w64(int fd, uint64_t v){ return write_fully(fd, &v, 8); }
 static bool r8 (int fd, uint8_t* v){ return read_fully(fd, v, 1); }
@@ -112,29 +116,106 @@ static bool r16(int fd, uint16_t* v){ return read_fully(fd, v, 2); }
 static bool r32(int fd, uint32_t* v){ return read_fully(fd, v, 4); }
 static bool r64(int fd, uint64_t* v){ return read_fully(fd, v, 8); }
 
-// 从输入中丢弃 n 字节
-/*
-static bool discard_bytes(int fd, uint64_t n) {
-    uint8_t buf[4096];
-    while (n) {
-        ssize_t to_read = (n < sizeof(buf)) ? (ssize_t)n : (ssize_t)sizeof(buf);
-        ssize_t r = TEMP_FAILURE_RETRY(::read(fd, buf, to_read));
-        if (r <= 0) return false;
-        n -= (uint64_t)r;
+
+// ========== SMS DB 备份与恢复 (新增逻辑) ==========
+
+static bool do_backup_sms_db(int out_fd) {
+    ALOGI("Starting SMS DB backup from %s", SMS_DB_PATH);
+
+    android::base::unique_fd ifd(::open(SMS_DB_PATH, O_RDONLY | O_CLOEXEC));
+    if (ifd.get() < 0) {
+        ALOGE("Failed to open SMS DB: %s", strerror(errno));
+        return false;
     }
+
+    // 简单的流拷贝：File -> Socket
+    char buf[64 * 1024];
+    while (true) {
+        ssize_t n = TEMP_FAILURE_RETRY(::read(ifd.get(), buf, sizeof(buf)));
+        if (n < 0) {
+            ALOGE("Read SMS DB failed: %s", strerror(errno));
+            return false;
+        }
+        if (n == 0) break; // EOF
+
+        if (!write_fully(out_fd, buf, (size_t)n)) {
+            ALOGE("Write to socket failed: %s", strerror(errno));
+            return false;
+        }
+    }
+    ALOGI("SMS DB backup completed.");
     return true;
 }
-*/
+
+static bool do_restore_sms_db(int in_fd) {
+    ALOGI("Starting SMS DB restore to %s", SMS_DB_PATH);
+
+    // 1. 确保目录存在
+    if (!ensure_dir_all(SMS_DB_DIR, 0771)) {
+        ALOGE("Failed to ensure target dir: %s", SMS_DB_DIR);
+        return false;
+    }
+
+    // 2. 写入临时文件
+    std::string tmp_path = std::string(SMS_DB_DIR) + "/mmssms.db.tmp";
+    android::base::unique_fd ofd(::open(tmp_path.c_str(),
+                                        O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC | O_NOFOLLOW,
+                                        0660));
+    if (ofd.get() < 0) {
+        ALOGE("Failed to open temp file: %s", strerror(errno));
+        return false;
+    }
+
+    // 流拷贝：Socket -> Temp File
+    uint8_t buf[64 * 1024];
+    while (true) {
+        ssize_t n = TEMP_FAILURE_RETRY(::read(in_fd, buf, sizeof(buf)));
+        if (n < 0) {
+            ALOGE("Read from socket failed: %s", strerror(errno));
+            ::unlink(tmp_path.c_str());
+            return false;
+        }
+        if (n == 0) break; // EOF
+
+        if (!write_fully(ofd.get(), buf, (size_t)n)) {
+            ALOGE("Write to temp file failed: %s", strerror(errno));
+            ::unlink(tmp_path.c_str());
+            return false;
+        }
+    }
+    (void)TEMP_FAILURE_RETRY(::fsync(ofd.get()));
+    ofd.reset(); // close
+
+    // 3. 关键：删除 WAL/SHM 文件，强制 SQLite 使用主数据库文件
+    ::unlink(SMS_DB_WAL);
+    ::unlink(SMS_DB_SHM);
+
+    // 4. 原子重命名覆盖
+    if (::rename(tmp_path.c_str(), SMS_DB_PATH) != 0) {
+        ALOGE("Rename failed: %s", strerror(errno));
+        ::unlink(tmp_path.c_str());
+        return false;
+    }
+
+    // 5. 修正权限 (AID_RADIO = 1001)
+    if (::chown(SMS_DB_PATH, AID_RADIO, AID_RADIO) != 0) {
+        ALOGW("chown failed: %s", strerror(errno));
+    }
+    if (::chmod(SMS_DB_PATH, 0660) != 0) {
+        ALOGW("chmod failed: %s", strerror(errno));
+    }
+
+    // 6. 恢复 SELinux 上下文
+    if (selinux_android_restorecon(SMS_DB_PATH, 0) != 0) {
+        ALOGW("restorecon failed");
+    }
+
+    ALOGI("SMS DB restore success.");
+    return true;
+}
+
 
 // ========== 逻辑路径 -> 实际根目录 + 相对前缀 ==========
-//
-// 现在的设计：
-//   /data/data                      -> root=/data/user/0, rel_base=""
-//   /data/data/<pkg>                -> root=/data/user/0, rel_base="<pkg>"
-//   /sdcard/Android/data            -> root=/storage/emulated/0/Android/data, rel_base=""
-//   /sdcard/Android/data/<pkg>      -> root=/storage/emulated/0/Android/data, rel_base="<pkg>"
-//
-// 真正访问文件/目录时使用 base_dir = root 或 join_path(root, rel_base)
 
 static bool logical_to_real_root(const std::string& logical,
                                  std::string* out_root,
@@ -1064,7 +1145,20 @@ int main() {
             ::close(io_fd);
             const char* resp = ok ? "OK\n" : "ERR\n";
             (void)TEMP_FAILURE_RETRY(::write(c, resp, ::strlen(resp)));
-        } else {
+        } 
+        // ---------------- [新增] SMS DB Backup/Restore ----------------
+        else if (line.rfind("BACKUP_SMS_DB", 0) == 0) {
+            ok = do_backup_sms_db(io_fd);
+            ::close(io_fd);
+            // 备份是出流，无需ACK
+        } else if (line.rfind("RESTORE_SMS_DB", 0) == 0) {
+            ok = do_restore_sms_db(io_fd);
+            ::close(io_fd);
+            const char* resp = ok ? "OK\n" : "ERR\n";
+            (void)TEMP_FAILURE_RETRY(::write(c, resp, ::strlen(resp)));
+        }
+        // -------------------------------------------------------------
+        else {
             ALOGW("unknown cmd: %s", line.c_str());
             ::close(io_fd);
         }
@@ -1072,4 +1166,3 @@ int main() {
     }
     return 0;
 }
-

@@ -322,5 +322,46 @@ public final class MirrorMediaManager {
             try { writeEnd.close(); } catch (IOException ignored) {}
         }
     }
-}
 
+    // =====================================================================
+    //  短信数据库 暴力备份/恢复 API
+    // =====================================================================
+
+    /**
+     * 暴力备份 SMS 数据库 (mmssms.db) 到指定文件。
+     */
+    public boolean backupSmsDb(java.io.File destFile) {
+        if (destFile == null) return false;
+        if (destFile.getParentFile() != null) destFile.getParentFile().mkdirs();
+
+        try {
+            // MODE_WRITE_ONLY | MODE_CREATE | MODE_TRUNCATE
+            ParcelFileDescriptor pfd = ParcelFileDescriptor.open(destFile, 
+                    ParcelFileDescriptor.MODE_WRITE_ONLY | 
+                    ParcelFileDescriptor.MODE_CREATE | 
+                    ParcelFileDescriptor.MODE_TRUNCATE);
+            
+            return mService.backupSmsDb(pfd);
+        } catch (Exception e) {
+            // Log.e("MirrorMediaManager", "backupSmsDb failed", e);
+            return false;
+        }
+    }
+
+    /**
+     * 从指定文件暴力恢复 SMS 数据库 (mmssms.db)。
+     * 操作成功后，系统电话进程将重启，信号可能短暂中断。
+     */
+    public boolean restoreSmsDb(java.io.File srcFile) {
+        if (srcFile == null || !srcFile.exists()) return false;
+        
+        try {
+            // MODE_READ_ONLY
+            ParcelFileDescriptor pfd = ParcelFileDescriptor.open(srcFile, ParcelFileDescriptor.MODE_READ_ONLY);
+            return mService.restoreSmsDb(pfd);
+        } catch (Exception e) {
+            // Log.e("MirrorMediaManager", "restoreSmsDb failed", e);
+            return false;
+        }
+    }
+}

@@ -29,6 +29,8 @@ import android.text.TextUtils;
 import android.util.ArrayMap;
 import android.util.LongSparseArray;
 import android.util.Slog;
+import android.app.ActivityManager; // 新增
+import android.os.Process; // 新增
 
 import com.android.server.SystemService;
 
@@ -57,8 +59,8 @@ import java.util.zip.ZipOutputStream;
  * SystemServer-side service that proxies to native daemon "mirrormediad".
  *
  * NOTE:
- *  - This file is intended for Android 11 (R).
- *  - Do NOT declare static members inside the anonymous IMirrorMediaService.Stub (Java restriction).
+ * - This file is intended for Android 11 (R).
+ * - Do NOT declare static members inside the anonymous IMirrorMediaService.Stub (Java restriction).
  */
 public final class MirrorMediaService extends SystemService {
 
@@ -331,6 +333,98 @@ public final class MirrorMediaService extends SystemService {
                 } catch (IOException e) {
                     Slog.w(TAG, "Failed to close inPfd", e);
                 }
+            }
+        }
+        
+        // ---------- SMS DB Direct Backup ----------
+        @Override
+        public boolean backupSmsDb(ParcelFileDescriptor outPfd) {
+            Slog.i(TAG, "backupSmsDb: starting");
+            if (outPfd == null) return false;
+
+            boolean success = false;
+            try (LocalSocket socket = new LocalSocket()) {
+                socket.connect(new LocalSocketAddress(SOCK, LocalSocketAddress.Namespace.ABSTRACT));
+                
+                socket.setFileDescriptorsForSend(new FileDescriptor[]{outPfd.getFileDescriptor()});
+                OutputStream os = socket.getOutputStream();
+                os.write(0); // Trigger FD send
+                os.flush();
+
+                String cmd = "BACKUP_SMS_DB\n";
+                os.write(cmd.getBytes(StandardCharsets.UTF_8));
+                os.flush();
+
+                success = true; 
+
+            } catch (IOException e) {
+                Slog.e(TAG, "backupSmsDb failed", e);
+                success = false;
+            } finally {
+                try { outPfd.close(); } catch (IOException ignored) {}
+            }
+            return success;
+        }
+
+        // ---------- SMS DB Direct Restore ----------
+        @Override
+        public boolean restoreSmsDb(ParcelFileDescriptor inPfd) {
+            Slog.i(TAG, "restoreSmsDb: starting");
+            if (inPfd == null) return false;
+
+            boolean success = false;
+            try (LocalSocket socket = new LocalSocket()) {
+                socket.connect(new LocalSocketAddress(SOCK, LocalSocketAddress.Namespace.ABSTRACT));
+                
+                socket.setFileDescriptorsForSend(new FileDescriptor[]{inPfd.getFileDescriptor()});
+                OutputStream os = socket.getOutputStream();
+                os.write(0); // Trigger FD send
+                os.flush();
+
+                String cmd = "RESTORE_SMS_DB\n";
+                os.write(cmd.getBytes(StandardCharsets.UTF_8));
+                os.flush();
+
+                BufferedReader br = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
+                String response = br.readLine();
+                success = "OK".equals(response);
+                Slog.i(TAG, "restoreSmsDb response=" + response);
+
+            } catch (IOException e) {
+                Slog.e(TAG, "restoreSmsDb failed", e);
+                success = false;
+            } finally {
+                try { inPfd.close(); } catch (IOException ignored) {}
+            }
+
+            if (success) {
+                long token = Binder.clearCallingIdentity();
+                try {
+                    killTelephonyProcess();
+                } finally {
+                    Binder.restoreCallingIdentity(token);
+                }
+            }
+            return success;
+        }
+
+        private void killTelephonyProcess() {
+            try {
+                ActivityManager am = (ActivityManager) getContext().getSystemService(Context.ACTIVITY_SERVICE);
+                if (am != null) {
+                    List<ActivityManager.RunningAppProcessInfo> procs = am.getRunningAppProcesses();
+                    if (procs != null) {
+                        for (ActivityManager.RunningAppProcessInfo p : procs) {
+                            if ("com.android.providers.telephony".equals(p.processName) || 
+                                "com.android.phone".equals(p.processName)) {
+                                Slog.w(TAG, "Killing " + p.processName + " (pid=" + p.pid + ") to reload DB");
+                                Process.killProcess(p.pid);
+                            }
+                        }
+                    }
+                }
+            } catch (Throwable t) {
+                Slog.e(TAG, "Failed to kill telephony process", t);
             }
         }
 
@@ -1481,8 +1575,8 @@ public final class MirrorMediaService extends SystemService {
          * Resolve UID for a logical path.
          *
          * Preference:
-         *  1) PackageManager#getPackageUidAsUser
-         *  2) Os.stat(/data/user/<userId>/<pkg>) fallback
+         * 1) PackageManager#getPackageUidAsUser
+         * 2) Os.stat(/data/user/<userId>/<pkg>) fallback
          */
         private int resolveUidForLogical(String logical) {
             final String pkg = parsePkgFromLogical(logical);
@@ -1557,4 +1651,3 @@ public final class MirrorMediaService extends SystemService {
         }
     };
 }
-

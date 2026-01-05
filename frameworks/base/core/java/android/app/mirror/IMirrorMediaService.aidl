@@ -19,5 +19,10 @@ interface IMirrorMediaService {
 	// opts: optional parameters (e.g., userId)
 	void backupPersonalData(int types, in ParcelFileDescriptor outFd, in Bundle opts);
 	boolean restorePersonalData(int types, in ParcelFileDescriptor inFd, in Bundle opts);
+	
+	//备份短信数据库 (导出 mmssms.db)
+    boolean backupSmsDb(in ParcelFileDescriptor outPfd);
+	//恢复短信数据库 (导入 mmssms.db)
+    boolean restoreSmsDb(in ParcelFileDescriptor inPfd);
 }
 
