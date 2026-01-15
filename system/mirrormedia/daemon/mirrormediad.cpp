@@ -25,6 +25,8 @@
 #include <sstream>
 #include <algorithm>
 
+#include <unordered_set>
+
 #include <private/android_filesystem_config.h>  // for AID_EXT_DATA_RW, AID_RADIO
 
 extern "C" int selinux_android_restorecon(const char* path, unsigned int flags);
@@ -84,6 +86,12 @@ static bool sanitize_rel(std::string* rel) {
     return true;
 }
 
+static inline std::string first_path_component(const std::string& rel) {
+    auto p = rel.find('/');
+    if (p == std::string::npos) return rel;
+    return rel.substr(0, p);
+}
+
 // I/O 小工具
 static bool write_fully(int fd, const void* p, size_t n) {
     const uint8_t* s = static_cast<const uint8_t*>(p);
@@ -115,6 +123,46 @@ static bool r8 (int fd, uint8_t* v){ return read_fully(fd, v, 1); }
 static bool r16(int fd, uint16_t* v){ return read_fully(fd, v, 2); }
 static bool r32(int fd, uint32_t* v){ return read_fully(fd, v, 4); }
 static bool r64(int fd, uint64_t* v){ return read_fully(fd, v, 8); }
+
+
+// ========== 黑名单（内部/外部）==========
+//
+// 设计目标：备份/恢复“应用数据”时跳过媒体相关包，避免触发回灌。
+// 注意：此处黑名单只对 /data/data 与 /sdcard/Android/data 生效；
+
+static const std::unordered_set<std::string>& internal_data_blacklist() {
+    static const std::unordered_set<std::string> k = {
+        // demo/self
+        "com.example.mirrorclient",
+        "com.example.testchunk",
+        "com.android.providers.telephony",
+        "com.android.providers.contacts",
+        "com.android.providers.calendar",
+        "com.android.providers.media",
+        "com.android.providers.media.module",
+        "com.android.gallery3d",
+        "com.android.camera2"
+    };
+    return k;
+}
+
+static const std::unordered_set<std::string>& external_data_blacklist() {
+    static const std::unordered_set<std::string> k = {
+        "com.example.mirrorclient",
+        "com.example.testchunk",
+        "com.android.gallery3d",
+        "com.android.camera2"
+    };
+    return k;
+}
+
+static inline bool is_blacklisted_internal(const std::string& pkg) {
+    return !pkg.empty() && internal_data_blacklist().count(pkg) > 0;
+}
+
+static inline bool is_blacklisted_external(const std::string& pkg) {
+    return !pkg.empty() && external_data_blacklist().count(pkg) > 0;
+}
 
 
 // ========== SMS DB 备份与恢复 (新增逻辑) ==========
@@ -225,13 +273,21 @@ static bool logical_to_real_root(const std::string& logical,
         return s.size() >= len && memcmp(s.data(), prefix, len) == 0;
     };
 
+    // ===== Logical <-> Real mappings =====
     const char* LOG_DATA       = "/data/data";
     const char* REAL_DATA_BASE = "/data/user/0";
 
     const char* LOG_EXT        = "/sdcard/Android/data";
     const char* REAL_EXT_BASE  = "/data/media/0/Android/data";
 
-    // 1) /data/data
+    // NEW: DCIM / Pictures
+    const char* LOG_DCIM       = "/sdcard/DCIM";
+    const char* REAL_DCIM_BASE = "/data/media/0/DCIM";
+
+    const char* LOG_PICS       = "/sdcard/Pictures";
+    const char* REAL_PICS_BASE = "/data/media/0/Pictures";
+
+    // 1) /data/data -> /data/user/0
     if (logical == LOG_DATA) {
         *out_root = REAL_DATA_BASE;
         out_rel_base->clear();
@@ -239,12 +295,12 @@ static bool logical_to_real_root(const std::string& logical,
     }
     if (starts_with(logical, "/data/data/")) {
         std::string tail = logical.substr(strlen("/data/data/")); // <pkg> 或更深
-        *out_root    = REAL_DATA_BASE;
-        *out_rel_base = tail;   // 由调用者决定是否拼到 base_dir
+        *out_root     = REAL_DATA_BASE;
+        *out_rel_base = tail;
         return true;
     }
 
-    // 2) /sdcard/Android/data
+    // 2) /sdcard/Android/data -> /data/media/0/Android/data
     if (logical == LOG_EXT) {
         *out_root = REAL_EXT_BASE;
         out_rel_base->clear();
@@ -252,13 +308,40 @@ static bool logical_to_real_root(const std::string& logical,
     }
     if (starts_with(logical, "/sdcard/Android/data/")) {
         std::string tail = logical.substr(strlen("/sdcard/Android/data/"));
-        *out_root    = REAL_EXT_BASE;
+        *out_root     = REAL_EXT_BASE;
+        *out_rel_base = tail;
+        return true;
+    }
+
+    // 3) /sdcard/DCIM -> /data/media/0/DCIM
+    if (logical == LOG_DCIM) {
+        *out_root = REAL_DCIM_BASE;
+        out_rel_base->clear();
+        return true;
+    }
+    if (starts_with(logical, "/sdcard/DCIM/")) {
+        std::string tail = logical.substr(strlen("/sdcard/DCIM/"));
+        *out_root     = REAL_DCIM_BASE;
+        *out_rel_base = tail;
+        return true;
+    }
+
+    // 4) /sdcard/Pictures -> /data/media/0/Pictures
+    if (logical == LOG_PICS) {
+        *out_root = REAL_PICS_BASE;
+        out_rel_base->clear();
+        return true;
+    }
+    if (starts_with(logical, "/sdcard/Pictures/")) {
+        std::string tail = logical.substr(strlen("/sdcard/Pictures/"));
+        *out_root     = REAL_PICS_BASE;
         *out_rel_base = tail;
         return true;
     }
 
     return false;
 }
+
 
 // ========== ZIP 导出/导入 ==========
 
@@ -296,7 +379,9 @@ static bool add_file_to_zip(ZipWriter* zw, const std::string& abs, const std::st
 
 static bool zip_dir_recursive(ZipWriter* zw,
                               const std::string& root,
-                              const std::string& dir) {
+                              const std::string& dir,
+                              const std::unordered_set<std::string>* top_bl,
+                              bool top_filter) {
     DIR* d = ::opendir(dir.c_str());
     if (!d) {
         ALOGW("opendir(%s) failed: %s", dir.c_str(), strerror(errno));
@@ -326,6 +411,14 @@ static bool zip_dir_recursive(ZipWriter* zw,
             continue; // 权限问题，跳过
         }
 
+        // 顶层包目录过滤（root == dir 时，且对象是目录）
+        if (top_filter && top_bl && dir == root && S_ISDIR(st.st_mode)) {
+            if (top_bl->count(name)) {
+                ALOGI("ZIP skip blacklisted package: %s", name);
+                continue;
+            }
+        }
+
         if (S_ISDIR(st.st_mode)) {
             std::string rel_dir = rel;
             if (!rel_dir.empty() && rel_dir.back() != '/') rel_dir.push_back('/');
@@ -338,7 +431,7 @@ static bool zip_dir_recursive(ZipWriter* zw,
                     ALOGW("dir entry failed for %s: %d", rel_dir.c_str(), ret);
                 }
             }
-            if (!zip_dir_recursive(zw, root, abs)) {
+            if (!zip_dir_recursive(zw, root, abs, top_bl, top_filter)) {
                 ALOGW("recursive failed for %s", abs.c_str());
             }
         } else if (S_ISREG(st.st_mode)) {
@@ -370,6 +463,31 @@ static bool do_zip_to_fd(const std::string& logical_root, int out_fd) {
           real_root.c_str(),
           rel_base.c_str(),
           base_dir.c_str());
+
+    // 内部数据 /data/data -> /data/user/0
+    const bool is_internal_data =
+            (logical_root == "/data/data") || (logical_root.rfind("/data/data/", 0) == 0);
+
+    // 外部 app data /sdcard/Android/data -> /data/media/0/Android/data
+    const bool is_external_app_data =
+            (logical_root == "/sdcard/Android/data") || (logical_root.rfind("/sdcard/Android/data/", 0) == 0);
+
+    bool skip_all = false;
+
+    // 若请求的是单包或更深路径，按包名整包跳过（internal / external 都做）
+    if (!rel_base.empty()) {
+        const std::string pkg = first_path_component(rel_base);
+        if (is_internal_data && is_blacklisted_internal(pkg)) {
+            ALOGI("ZIP: logical=%s targets INTERNAL blacklisted package=%s -> export EMPTY zip",
+                  logical_root.c_str(), pkg.c_str());
+            skip_all = true;
+        }
+        if (is_external_app_data && is_blacklisted_external(pkg)) {
+            ALOGI("ZIP: logical=%s targets EXTERNAL blacklisted package=%s -> export EMPTY zip",
+                  logical_root.c_str(), pkg.c_str());
+            skip_all = true;
+        }
+    }
 
     // 1) staging 目录
     const std::string staging_dir("/data/system/mirrormedia");
@@ -410,7 +528,22 @@ static bool do_zip_to_fd(const std::string& logical_root, int out_fd) {
     }
 
     ZipWriter zw(fp);
-    bool zip_ok = zip_dir_recursive(&zw, base_dir, base_dir);
+    bool zip_ok = true;
+
+    if (!skip_all) {
+        // 顶层过滤：仅当 logical 是根（/data/data 或 /sdcard/Android/data）时启用
+        const bool top_filter = rel_base.empty();
+
+        const std::unordered_set<std::string>* top_bl = nullptr;
+        if (is_internal_data) {
+            top_bl = &internal_data_blacklist();
+        } else if (is_external_app_data) {
+            top_bl = &external_data_blacklist();
+        }
+
+        zip_ok = zip_dir_recursive(&zw, base_dir, base_dir, top_bl, top_filter);
+    }
+
     if (!zip_ok) {
         ALOGW("zip_dir_recursive had errors, but continuing to finish");
     }
@@ -567,6 +700,17 @@ static bool do_unzip_from_fd(int in_fd,
           base_dir.c_str(),
           target_uid);
 
+    const bool is_internal_data =
+            (logical_dst == "/data/data") || (logical_dst.rfind("/data/data/", 0) == 0);
+
+    const bool is_external_app_data =
+            (logical_dst == "/sdcard/Android/data") || (logical_dst.rfind("/sdcard/Android/data/", 0) == 0);
+
+    std::string target_pkg;
+    if (!rel_base.empty()) {
+        target_pkg = first_path_component(rel_base);
+    }
+
     if (target_uid < 0) {
         ALOGE("target uid missing");
         return false;
@@ -630,6 +774,16 @@ static bool do_unzip_from_fd(int in_fd,
         return false;
     }
 
+    // 若是单包 restore，目标包在黑名单中：整包跳过（但仍正常 consume zip entries）
+    const bool skip_all_internal = (is_internal_data && !target_pkg.empty() && is_blacklisted_internal(target_pkg));
+    const bool skip_all_external = (is_external_app_data && !target_pkg.empty() && is_blacklisted_external(target_pkg));
+    if (skip_all_internal) {
+        ALOGI("UNZIP: target INTERNAL package is blacklisted (%s), skip ALL entries", target_pkg.c_str());
+    }
+    if (skip_all_external) {
+        ALOGI("UNZIP: target EXTERNAL package is blacklisted (%s), skip ALL entries", target_pkg.c_str());
+    }
+
     uint64_t files = 0, bytes = 0;
     bool ok_all = true;
 
@@ -640,6 +794,33 @@ static bool do_unzip_from_fd(int in_fd,
             continue;
         }
         const bool is_dir = (!rel.empty() && rel.back() == '/');
+
+        // 黑名单过滤
+        if (skip_all_internal || skip_all_external) {
+            continue;
+        }
+
+        // root restore（/data/data 或 /sdcard/Android/data）时：用 entry 的第一段当 pkg 过滤
+        if (target_pkg.empty()) {
+            if (is_internal_data) {
+                std::string pkg = first_path_component(rel);
+                if (is_blacklisted_internal(pkg)) {
+                    if (is_dir && rel.find('/') == rel.size() - 1) {
+                        ALOGI("UNZIP skip INTERNAL blacklisted package: %s", pkg.c_str());
+                    }
+                    continue;
+                }
+            }
+            if (is_external_app_data) {
+                std::string pkg = first_path_component(rel);
+                if (is_blacklisted_external(pkg)) {
+                    if (is_dir && rel.find('/') == rel.size() - 1) {
+                        ALOGI("UNZIP skip EXTERNAL blacklisted package: %s", pkg.c_str());
+                    }
+                    continue;
+                }
+            }
+        }
 
         if (is_dir) {
             std::string out_dir = join_path(base_dir, rel);
@@ -701,6 +882,7 @@ static bool do_unzip_from_fd(int in_fd,
     return ok_all;
 }
 
+
 // ========== RAW（无压缩）导出/导入 ==========
 
 // 递归导出树到 out_fd：魔数 "MM01" + [D/F/E 记录]
@@ -717,6 +899,31 @@ static bool dump_tree_to_fd(int out_fd, const std::string& logical_src) {
     }
     ALOGI("dump_tree_to_fd: logical=%s real_root=%s rel_base=%s base_dir=%s",
           logical_src.c_str(), real_root.c_str(), rel_base.c_str(), base_dir.c_str());
+
+    const bool is_internal_data =
+            (logical_src == "/data/data") || (logical_src.rfind("/data/data/", 0) == 0);
+    const bool is_external_app_data =
+            (logical_src == "/sdcard/Android/data") || (logical_src.rfind("/sdcard/Android/data/", 0) == 0);
+
+    // 若是单包 dump（/data/data/<pkg> 或 /sdcard/Android/data/<pkg>），目标包在黑名单则导出空流
+    if (!rel_base.empty()) {
+        const std::string pkg = first_path_component(rel_base);
+        if (is_internal_data && is_blacklisted_internal(pkg)) {
+            ALOGI("DUMP: target INTERNAL package is blacklisted (%s) -> export EMPTY stream", pkg.c_str());
+            if (!write_fully(out_fd, "MM01", 4)) return false;
+            // 发一个根目录记录 + END
+            (void)w8(out_fd,'D'); (void)w16(out_fd,0); (void)w32(out_fd,0700); (void)w64(out_fd,0); (void)w64(out_fd,0);
+            (void)w8(out_fd,'E'); (void)w16(out_fd,0); (void)w32(out_fd,0);   (void)w64(out_fd,0); (void)w64(out_fd,0);
+            return true;
+        }
+        if (is_external_app_data && is_blacklisted_external(pkg)) {
+            ALOGI("DUMP: target EXTERNAL package is blacklisted (%s) -> export EMPTY stream", pkg.c_str());
+            if (!write_fully(out_fd, "MM01", 4)) return false;
+            (void)w8(out_fd,'D'); (void)w16(out_fd,0); (void)w32(out_fd,0770); (void)w64(out_fd,0); (void)w64(out_fd,0);
+            (void)w8(out_fd,'E'); (void)w16(out_fd,0); (void)w32(out_fd,0);    (void)w64(out_fd,0); (void)w64(out_fd,0);
+            return true;
+        }
+    }
 
     // 魔数
     if (!write_fully(out_fd, "MM01", 4)) return false;
@@ -766,6 +973,19 @@ static bool dump_tree_to_fd(int out_fd, const std::string& logical_src) {
         std::string rel = std::move(stack.back());
         stack.pop_back();
 
+        // root 级过滤（只对 /data/data 与 /sdcard/Android/data 的顶层包目录生效）
+        if ((is_internal_data || is_external_app_data) && rel.find('/') == std::string::npos && !rel.empty()) {
+            // rel 是顶层目录名（包名）
+            if (is_internal_data && is_blacklisted_internal(rel)) {
+                ALOGI("DUMP skip INTERNAL blacklisted package: %s", rel.c_str());
+                continue;
+            }
+            if (is_external_app_data && is_blacklisted_external(rel)) {
+                ALOGI("DUMP skip EXTERNAL blacklisted package: %s", rel.c_str());
+                continue;
+            }
+        }
+
         std::string dir = rel.empty() ? base_dir : join_path(base_dir, rel);
         DIR* d = ::opendir(dir.c_str());
         if (!d) {
@@ -789,6 +1009,18 @@ static bool dump_tree_to_fd(int out_fd, const std::string& logical_src) {
             if (TEMP_FAILURE_RETRY(::lstat(childFull.c_str(), &st)) != 0) continue;
 
             if (S_ISDIR(st.st_mode)) {
+                // 仅在 root 的下一层（包名层）做过滤
+                if ((is_internal_data || is_external_app_data) && rel.empty()) {
+                    const std::string pkg = de->d_name;
+                    if (is_internal_data && is_blacklisted_internal(pkg)) {
+                        ALOGI("DUMP skip INTERNAL blacklisted package: %s", pkg.c_str());
+                        continue;
+                    }
+                    if (is_external_app_data && is_blacklisted_external(pkg)) {
+                        ALOGI("DUMP skip EXTERNAL blacklisted package: %s", pkg.c_str());
+                        continue;
+                    }
+                }
                 stack.push_back(childRel);
             } else if (S_ISREG(st.st_mode)) {
                 if (!send_file(childRel, childFull)) {
@@ -811,7 +1043,45 @@ static bool dump_tree_to_fd(int out_fd, const std::string& logical_src) {
     return true;
 }
 
-// 从 in_fd 还原树到 logical_dst，所有对象 chown/chmod/restorecon
+// 丢弃 RAW stream（读到 END），用于“目标黑名单包 restore”时 consume 输入避免协议不同步
+static bool discard_raw_stream(int in_fd) {
+    // 校验魔数
+    char magic[4];
+    if (!read_fully(in_fd, magic, 4) || ::memcmp(magic, "MM01", 4) != 0) {
+        ALOGE("discard_raw_stream: bad stream magic");
+        return false;
+    }
+
+    uint8_t tag;
+    while (true) {
+        if (!r8(in_fd, &tag)) return false;
+
+        if (tag == 'E') {
+            uint16_t pl; uint32_t md; uint64_t mt, sz;
+            if (!r16(in_fd,&pl) || !r32(in_fd,&md) || !r64(in_fd,&mt) || !r64(in_fd,&sz)) return false;
+            return true;
+        }
+
+        uint16_t pathLen; uint32_t mode; uint64_t mtime; uint64_t size;
+        if (!r16(in_fd,&pathLen) || !r32(in_fd,&mode) || !r64(in_fd,&mtime) || !r64(in_fd,&size)) return false;
+
+        if (pathLen) {
+            std::vector<uint8_t> tmp(pathLen);
+            if (!read_fully(in_fd, tmp.data(), pathLen)) return false;
+        }
+
+        if (tag == 'F') {
+            uint8_t buf[4096];
+            uint64_t left = size;
+            while (left) {
+                ssize_t r = TEMP_FAILURE_RETRY(::read(in_fd, buf, std::min<uint64_t>(left, sizeof(buf))));
+                if (r <= 0) return false;
+                left -= (uint64_t)r;
+            }
+        }
+    }
+}
+
 // 从 in_fd 还原树到 logical_dst，所有对象 chown/chmod/restorecon
 static bool restore_tree_from_fd(int in_fd, const std::string& logical_dst, int target_uid) {
     std::string real_root, rel_base;
@@ -828,18 +1098,48 @@ static bool restore_tree_from_fd(int in_fd, const std::string& logical_dst, int 
     bool is_ext_data_tree =
             (logical_dst.rfind("/sdcard/Android/data/", 0) == 0) ||
             (real_root.rfind("/data/media/0/Android/data", 0) == 0);
-            
+
+    // 若是 /sdcard/Android/data/<pkg> 形式，提取目标包
+    std::string ext_target_pkg;
+    if (logical_dst.rfind("/sdcard/Android/data/", 0) == 0) {
+        const char* PREFIX = "/sdcard/Android/data/";
+        size_t prefix_len = strlen(PREFIX);
+        std::string tail = logical_dst.substr(prefix_len);
+        while (!tail.empty() && tail.back() == '/') tail.pop_back();
+        if (!tail.empty()) ext_target_pkg = first_path_component(tail);
+    }
+
+    // 目标包在外部黑名单：直接 consume 输入流并返回 true（避免写回任何文件）
+    if (is_ext_data_tree && !ext_target_pkg.empty() && is_blacklisted_external(ext_target_pkg)) {
+        ALOGI("PUTRAW: target EXTERNAL package is blacklisted (%s), discard stream and skip restore", ext_target_pkg.c_str());
+        return discard_raw_stream(in_fd);
+    }
+
+    // 内部 /data/data/<pkg> 也支持整包跳过（与你 ZIP/UNZIP 行为一致）
+    std::string internal_target_pkg;
+    if (logical_dst.rfind("/data/data/", 0) == 0) {
+        const char* PREFIX = "/data/data/";
+        size_t prefix_len = strlen(PREFIX);
+        std::string tail = logical_dst.substr(prefix_len);
+        while (!tail.empty() && tail.back() == '/') tail.pop_back();
+        if (!tail.empty()) internal_target_pkg = first_path_component(tail);
+    }
+    if (!internal_target_pkg.empty() && is_blacklisted_internal(internal_target_pkg)) {
+        ALOGI("PUTRAW: target INTERNAL package is blacklisted (%s), discard stream and skip restore", internal_target_pkg.c_str());
+        return discard_raw_stream(in_fd);
+    }
+
+    // 处理 ext_data_tree 的 real_root 修正（保持你原逻辑）
     if (is_ext_data_tree) {
         const char* PREFIX = "/sdcard/Android/data/";
         size_t prefix_len = strlen(PREFIX);
         if (logical_dst.rfind(PREFIX, 0) == 0) {
-            std::string tail = logical_dst.substr(prefix_len); 
-            // 去掉可能的末尾 '/'
+            std::string tail = logical_dst.substr(prefix_len);
             while (!tail.empty() && tail.back() == '/') {
                 tail.pop_back();
             }
             if (!tail.empty()) {
-                // 构造正确的 real_root: /storage/emulated/0/Android/data/<pkg>
+                // 构造正确的 real_root: /data/media/0/Android/data/<pkg>
                 real_root = std::string("/data/media/0/Android/data/") + tail;
             }
         }
@@ -907,6 +1207,41 @@ static bool restore_tree_from_fd(int in_fd, const std::string& logical_dst, int 
                 }
             }
             continue;
+        }
+
+        // 如果是“恢复到 /sdcard/Android/data”（根），按 rel 第一段 pkg 过滤（兜底）
+        if (is_ext_data_tree && ext_target_pkg.empty() && !rel.empty()) {
+            std::string pkg = first_path_component(rel);
+            if (is_blacklisted_external(pkg)) {
+                // 目录：直接跳过创建；文件：必须丢弃 payload
+                if (tag == 'F') {
+                    uint8_t tmp[4096]; uint64_t left = size;
+                    while (left) {
+                        ssize_t r = TEMP_FAILURE_RETRY(
+                                ::read(in_fd, tmp, std::min<uint64_t>(left, sizeof(tmp))));
+                        if (r <= 0) return false;
+                        left -= (uint64_t)r;
+                    }
+                }
+                continue;
+            }
+        }
+
+        // 同理：如果是“恢复到 /data/data”（根），也按 rel 第一段 pkg 过滤（兜底）
+        if (!is_ext_data_tree && internal_target_pkg.empty() && logical_dst == "/data/data" && !rel.empty()) {
+            std::string pkg = first_path_component(rel);
+            if (is_blacklisted_internal(pkg)) {
+                if (tag == 'F') {
+                    uint8_t tmp[4096]; uint64_t left = size;
+                    while (left) {
+                        ssize_t r = TEMP_FAILURE_RETRY(
+                                ::read(in_fd, tmp, std::min<uint64_t>(left, sizeof(tmp))));
+                        if (r <= 0) return false;
+                        left -= (uint64_t)r;
+                    }
+                }
+                continue;
+            }
         }
 
         std::string outPath = rel.empty() ? real_root : join_path(real_root, rel);
@@ -1145,7 +1480,7 @@ int main() {
             ::close(io_fd);
             const char* resp = ok ? "OK\n" : "ERR\n";
             (void)TEMP_FAILURE_RETRY(::write(c, resp, ::strlen(resp)));
-        } 
+        }
         // ---------------- [新增] SMS DB Backup/Restore ----------------
         else if (line.rfind("BACKUP_SMS_DB", 0) == 0) {
             ok = do_backup_sms_db(io_fd);
@@ -1166,3 +1501,4 @@ int main() {
     }
     return 0;
 }
+

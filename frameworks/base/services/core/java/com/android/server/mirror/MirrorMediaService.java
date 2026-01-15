@@ -84,12 +84,23 @@ public final class MirrorMediaService extends SystemService {
     // Media (images)
     private static final String ENTRY_MEDIA_IMAGES_META = "media/images_meta.jsonl";
     private static final String ENTRY_MEDIA_IMAGES_PREFIX = "media/images/"; // file entries start with this
+    private static final String ENTRY_MEDIA_DCIM_ZIP = "media/dcim.zip";
+    private static final String ENTRY_MEDIA_PICTURES_ZIP = "media/pictures.zip";
     // 旧版本曾将图片恢复到 Pictures/MirrorBackup/ 下；保留该常量用于兼容清理旧残留。
     private static final String MIRROR_MEDIA_BASE_RELATIVE = "Pictures/MirrorBackup/";
 
     // 为“恢复写入 DCIM/Camera 的图片”打标记，便于 clearBefore 只清理本工具恢复的数据。
     // Android 11 (R) 的 MediaStore.MediaColumns 中没有 DESCRIPTION 常量，使用 TITLE 作为轻量标记字段。
     private static final String MIRROR_IMAGE_MARK_TITLE = "MirrorBackupRestored";
+
+    // Android 11 does not expose Process.MEDIA_RW_UID. Keep a stable fallback.
+    // AID_MEDIA_RW is 1023 in AOSP.
+    private static final int MIRROR_AID_MEDIA_RW = 1023;
+
+    private static int getMediaRwUid() {
+        int uid = android.os.Process.getUidForName("media_rw");
+        return (uid > 0) ? uid : MIRROR_AID_MEDIA_RW;
+    }
 
     // Calendar restore target (local calendar)
     private static final String MIRROR_CAL_ACCOUNT_NAME = "mirror";
@@ -536,6 +547,10 @@ public final class MirrorMediaService extends SystemService {
 
             // media flags
             boolean seenMediaMeta = false;
+            boolean seenMediaZip = false;
+            int mediaZipSeen = 0;
+            int mediaZipOk = 0;
+            int mediaZipFail = 0;
             int imgSeen = 0;
             int imgOk = 0;
             int imgFail = 0;
@@ -631,6 +646,23 @@ public final class MirrorMediaService extends SystemService {
                                 seenContactsData = true;
                                 ok &= restoreContactsDataFromEntry(zis, cr);
 
+                            // Media nested zip (daemon-backed)
+                            } else if (ENTRY_MEDIA_DCIM_ZIP.equals(name)
+                                    && (types & MirrorMediaManager.TYPE_MEDIA) != 0) {
+                                seenMediaZip = true;
+                                mediaZipSeen++;
+                                boolean one = restoreDaemonUnzipFromZipEntry(zis, "/sdcard/DCIM", getMediaRwUid());
+                                if (one) mediaZipOk++; else mediaZipFail++;
+                                ok &= one;
+
+                            } else if (ENTRY_MEDIA_PICTURES_ZIP.equals(name)
+                                    && (types & MirrorMediaManager.TYPE_MEDIA) != 0) {
+                                seenMediaZip = true;
+                                mediaZipSeen++;
+                                boolean one = restoreDaemonUnzipFromZipEntry(zis, "/sdcard/Pictures", getMediaRwUid());
+                                if (one) mediaZipOk++; else mediaZipFail++;
+                                ok &= one;
+
                             // Media meta
                             } else if (ENTRY_MEDIA_IMAGES_META.equals(name) && (types & MirrorMediaManager.TYPE_MEDIA) != 0) {
                                 seenMediaMeta = true;
@@ -662,10 +694,12 @@ public final class MirrorMediaService extends SystemService {
                 if ((types & MirrorMediaManager.TYPE_MEDIA) != 0) {
                     Slog.i(TAG, "restoreImages summary: metaLoaded=" + mImageMetaMap.size()
                             + " seenMetaEntry=" + seenMediaMeta
+                            + " zipSeen=" + mediaZipSeen + " zipOk=" + mediaZipOk + " zipFail=" + mediaZipFail
                             + " fileSeen=" + imgSeen + " ok=" + imgOk + " fail=" + imgFail);
 
                     // Avoid "ok=true but restored nothing" illusion
                     if (imgSeen > 0 && imgOk == 0) ok = false;
+                    if (mediaZipSeen > 0 && mediaZipOk == 0) ok = false;
                 }
 
                 if ((types & MirrorMediaManager.TYPE_SMS) != 0 && !seenSms) {
@@ -690,8 +724,8 @@ public final class MirrorMediaService extends SystemService {
                         ok = false;
                     }
                 }
-                if ((types & MirrorMediaManager.TYPE_MEDIA) != 0 && !seenMediaMeta) {
-                    // not fatal if files exist and we can fallback, but keep signal
+                if ((types & MirrorMediaManager.TYPE_MEDIA) != 0 && !seenMediaMeta && !seenMediaZip) {
+                    // not fatal if we restore by file entries, but keep signal
                     Slog.w(TAG, "restorePersonalData: missing entry " + ENTRY_MEDIA_IMAGES_META);
                 }
 
@@ -991,102 +1025,27 @@ public final class MirrorMediaService extends SystemService {
         }
 
         private int backupImages(ZipOutputStream zos, ContentResolver cr) throws IOException {
-            final Uri imagesUri = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY);
-
-            // scan to metas first (avoid nesting zip entries)
-            final List<ImageMeta> metas = new ArrayList<>();
-            Cursor c = null;
-            try {
-                c = cr.query(imagesUri,
-                        new String[]{
-                                MediaStore.Images.Media._ID,
-                                MediaStore.Images.Media.DISPLAY_NAME,
-                                MediaStore.Images.Media.RELATIVE_PATH,
-                                MediaStore.Images.Media.MIME_TYPE,
-                                MediaStore.Images.Media.DATE_TAKEN,
-                                MediaStore.Images.Media.SIZE
-                        },
-                        null, null,
-                        MediaStore.Images.Media.DATE_TAKEN + " DESC");
-                if (c == null) return 0;
-
-                while (c.moveToNext()) {
-                    ImageMeta m = new ImageMeta();
-                    m.id = c.getLong(0);
-                    m.display = c.getString(1);
-                    m.relativePath = c.getString(2);
-                    m.mime = c.getString(3);
-                    m.dateTaken = c.isNull(4) ? 0 : c.getLong(4);
-                    m.size = c.isNull(5) ? 0 : c.getLong(5);
-
-                    if (m.display == null || m.display.isEmpty()) m.display = "img_" + m.id;
-                    if (m.relativePath == null || m.relativePath.isEmpty()) m.relativePath = "Pictures/";
-                    m.relativePath = normalizeRelPath(m.relativePath);
-
-                    String entryPath = ENTRY_MEDIA_IMAGES_PREFIX + m.relativePath + m.display;
-                    m.entryPath = sanitizeZipName(entryPath);
-                    metas.add(m);
-                }
-            } finally {
-                if (c != null) c.close();
-            }
-
-            // 1) meta entry
-            zos.putNextEntry(new ZipEntry(ENTRY_MEDIA_IMAGES_META));
-            BufferedWriter metaW = new BufferedWriter(new OutputStreamWriter(zos, StandardCharsets.UTF_8));
-            try {
-                for (ImageMeta m : metas) {
-                    JSONObject o = new JSONObject();
-                    try {
-                        o.put("id", m.id);
-                        o.put("displayName", m.display);
-                        o.put("relativePath", m.relativePath);
-                        o.put("mime", m.mime == null ? JSONObject.NULL : m.mime);
-                        o.put("dateTaken", m.dateTaken);
-                        o.put("size", m.size);
-                        o.put("entry", m.entryPath);
-                    } catch (JSONException je) {
-                        throw new IOException("media meta json", je);
-                    }
-                    metaW.write(o.toString());
-                    metaW.write('\n');
-                }
-                metaW.flush();
-            } finally {
-                zos.closeEntry();
-            }
-
-            // 2) file entries
-            int ok = 0;
-            byte[] buf = new byte[256 * 1024];
-            for (ImageMeta m : metas) {
-                Uri one = ContentUris.withAppendedId(imagesUri, m.id);
-                InputStream is = null;
-                try {
-                    is = cr.openInputStream(one);
-                    if (is == null) continue;
-
-                    zos.putNextEntry(new ZipEntry(m.entryPath));
-                    int r;
-                    while ((r = is.read(buf)) > 0) {
-                        zos.write(buf, 0, r);
-                    }
-                    zos.closeEntry();
-                    ok++;
-                } catch (Throwable t) {
-                    Slog.w(TAG, "backupImages: skip id=" + m.id + " uri=" + one, t);
-                    try { zos.closeEntry(); } catch (Throwable ignored) {}
-                } finally {
-                    if (is != null) try { is.close(); } catch (IOException ignored) {}
-                }
-            }
-            return ok;
+            // IMPORTANT: On some real devices (e.g., Pixel 3a XL) MediaProvider may be unable to
+            // open /storage/emulated/0/DCIM/... for system_server due to SELinux policy
+            // differences between emulator and device.
+            //
+            // To make photo backup stable across devices, we avoid ContentResolver.openInputStream()
+            // for content://media/* and instead delegate file I/O to mirrormediad.
+            //
+            // The daemon will ZIP the target folders and we embed them as nested zip blobs.
+            int exported = 0;
+            if (writeDaemonZipEntry(zos, ENTRY_MEDIA_DCIM_ZIP, "/sdcard/DCIM")) exported++;
+            if (writeDaemonZipEntry(zos, ENTRY_MEDIA_PICTURES_ZIP, "/sdcard/Pictures")) exported++;
+            return exported;
         }
 
         private int clearMirrorImages(ContentResolver cr) {
             // clearBefore 只清理“本工具恢复产生”的图片：
-            // 1) 新版恢复到 DCIM/Camera/ 时，通过 TITLE 打标记。
+            // 1) 旧版通过 MediaStore 写入 DCIM/Camera 时，用 TITLE 打标记。
             // 2) 兼容旧版残留（Pictures/MirrorBackup/%）。
+            //
+            // 说明：当前版本媒体备份/恢复走 mirrormediad（文件系统层），不会为每张图片写入 MediaStore 标记。
+            // 因此这里主要用于清理旧版本遗留数据，避免误删用户真实相册内容。
             final Uri imagesUri = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY);
             final String where = "(" + MediaStore.MediaColumns.TITLE + "=? OR "
                     + MediaStore.MediaColumns.RELATIVE_PATH + " LIKE ?)";
@@ -1099,6 +1058,110 @@ public final class MirrorMediaService extends SystemService {
             } catch (Throwable t) {
                 Slog.w(TAG, "clearMirrorImages failed", t);
                 return 0;
+            }
+        }
+
+        /**
+         * Ask mirrormediad to ZIP <logicalPath> into a pipe, and store it as a single zip entry
+         * inside the current personal-data zip (nested zip).
+         */
+        private boolean writeDaemonZipEntry(ZipOutputStream zos, String zipEntryName, String logicalPath) {
+            ParcelFileDescriptor[] pipe = null;
+            boolean entryOpened = false;
+            try {
+                zos.putNextEntry(new ZipEntry(zipEntryName));
+                entryOpened = true;
+
+                pipe = ParcelFileDescriptor.createPipe(); // [0]=read, [1]=write
+                final ParcelFileDescriptor read = pipe[0];
+                final ParcelFileDescriptor write = pipe[1];
+
+                try (LocalSocket socket = new LocalSocket()) {
+                    socket.connect(new LocalSocketAddress(SOCK, LocalSocketAddress.Namespace.ABSTRACT));
+                    socket.setFileDescriptorsForSend(new FileDescriptor[]{write.getFileDescriptor()});
+
+                    final OutputStream sockOut = socket.getOutputStream();
+                    sockOut.write(0); // dummy byte to attach FD
+                    sockOut.flush();
+                    final String cmd = "ZIP " + logicalPath + "\n";
+                    sockOut.write(cmd.getBytes(StandardCharsets.UTF_8));
+                    sockOut.flush();
+
+                    // Close our local copy of write-end; daemon still holds it
+                    try { write.close(); } catch (Throwable ignored) {}
+
+                    try (InputStream in = new BufferedInputStream(new ParcelFileDescriptor.AutoCloseInputStream(read))) {
+                        byte[] buf = new byte[256 * 1024];
+                        int n;
+                        while ((n = in.read(buf)) >= 0) {
+                            if (n > 0) zos.write(buf, 0, n);
+                        }
+                    }
+                }
+
+                zos.closeEntry();
+                return true;
+            } catch (Throwable t) {
+                Slog.e(TAG, "writeDaemonZipEntry failed: entry=" + zipEntryName + " logical=" + logicalPath, t);
+                if (entryOpened) {
+                    try { zos.closeEntry(); } catch (Throwable ignored) {}
+                }
+                if (pipe != null) {
+                    try { pipe[0].close(); } catch (Throwable ignored) {}
+                    try { pipe[1].close(); } catch (Throwable ignored) {}
+                }
+                return false;
+            }
+        }
+
+        /**
+         * Restore a nested zip entry by piping its raw bytes into mirrormediad UNZIP.
+         */
+        private boolean restoreDaemonUnzipFromZipEntry(ZipInputStream zis, String logicalTarget, int uid) {
+            ParcelFileDescriptor[] pipe = null;
+            try {
+                pipe = ParcelFileDescriptor.createPipe(); // [0]=read for daemon, [1]=write from zis
+                final ParcelFileDescriptor read = pipe[0];
+                final ParcelFileDescriptor write = pipe[1];
+
+                try (LocalSocket socket = new LocalSocket()) {
+                    socket.connect(new LocalSocketAddress(SOCK, LocalSocketAddress.Namespace.ABSTRACT));
+                    socket.setFileDescriptorsForSend(new FileDescriptor[]{read.getFileDescriptor()});
+
+                    final OutputStream sockOut = socket.getOutputStream();
+                    sockOut.write(0);
+                    sockOut.flush();
+                    final String cmd = "UNZIP " + logicalTarget + " UID " + uid + "\n";
+                    sockOut.write(cmd.getBytes(StandardCharsets.UTF_8));
+                    sockOut.flush();
+
+                    // Close our local copy of read-end; daemon still holds it
+                    try { read.close(); } catch (Throwable ignored) {}
+
+                    // Stream nested zip bytes into the pipe (daemon reads until EOF)
+                    try (OutputStream out = new BufferedOutputStream(new ParcelFileDescriptor.AutoCloseOutputStream(write))) {
+                        byte[] buf = new byte[256 * 1024];
+                        int n;
+                        while ((n = zis.read(buf)) > 0) {
+                            out.write(buf, 0, n);
+                        }
+                        out.flush();
+                    }
+
+                    final BufferedReader br = new BufferedReader(
+                            new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
+                    final String resp = br.readLine();
+                    final boolean ok = "OK".equals(resp);
+                    Slog.i(TAG, "restoreDaemonUnzipFromZipEntry: target=" + logicalTarget + " resp=" + resp);
+                    return ok;
+                }
+            } catch (Throwable t) {
+                Slog.e(TAG, "restoreDaemonUnzipFromZipEntry failed: target=" + logicalTarget, t);
+                if (pipe != null) {
+                    try { pipe[0].close(); } catch (Throwable ignored) {}
+                    try { pipe[1].close(); } catch (Throwable ignored) {}
+                }
+                return false;
             }
         }
 
